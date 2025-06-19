@@ -1,0 +1,6 @@
+data/
+.idea/
+.DS_Store
+Vision Transformer/lightning_logs/
+Vision Transformer/model/
+
