@@ -6,9 +6,10 @@ import scanpy as sc
 import torch
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import LabelEncoder
-from gsMap.config import FindLatentRepresentationsConfig
-from gsMap.GNN.adjacency_matrix import construct_adjacency_matrix
-from gsMap.GNN.train import ModelTrainer
+from config import FindLatentRepresentationsConfig
+from GNN.adjacency_matrix import construct_adjacency_matrix
+from GNN.train import ModelTrainer
+
 
 logger = logging.getLogger(__name__)
 

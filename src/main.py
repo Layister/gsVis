@@ -1,40 +1,35 @@
-import argparse
+from config import FindLatentRepresentationsConfig, LatentToGeneConfig
+from find_latent_representation import run_find_latent_representation
+from latent_to_gene import run_latent_to_gene
+import warnings
 
-from gsMap import __version__
-from gsMap.config import cli_function_registry
+# 忽略警告
+warnings.filterwarnings("ignore", category=UserWarning, module="anndata")
 
-
-def main():
-    parser = create_parser()
-    args = parser.parse_args()
-    if args.subcommand is None:
-        parser.print_help()
-        exit(1)
-    args.func(args)
-
-
-def create_parser():
-    parser = argparse.ArgumentParser(
-        description=" gsMap: genetically informed spatial mapping of cells for complex traits",
-        formatter_class=argparse.RawTextHelpFormatter,
-        prog="gsMap",
-    )
-    parser.add_argument(
-        "--version", "-v", action="version", version=f"gsMap version {__version__}"
-    )
-    subparsers = parser.add_subparsers(
-        dest="subcommand", help="Subcommands", title="Available subcommands"
-    )
-    for subcommand in cli_function_registry.values():
-        subcommand_parser = subparsers.add_parser(
-            subcommand.name,
-            help=subcommand.description,
-            formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-        )
-        subcommand.add_args_function(subcommand_parser)
-        subcommand_parser.set_defaults(func=subcommand.func)
-    return parser
+# 地址
+work_dir = "/Users/wuyang/Documents/MyPaper/3/gsVis/data/"
+sample_name = "Human_Breast_Cancer"
+sample_id = "BRCA/"
 
 
-if __name__ == "__main__":
-    main()
+latent_config = FindLatentRepresentationsConfig(
+    input_hdf5_path = work_dir + sample_id + "/spatial_transcriptomics.h5ad",
+    workdir = work_dir + sample_id,
+    sample_name = sample_name,
+    data_layer="X",
+    n_comps=20,  # 潜在空间维度
+    #annotation = "annotation_type" #注释类型
+    # 其他参数...
+)
+run_find_latent_representation(latent_config)
+
+
+# 2. 计算GSS
+gss_config = LatentToGeneConfig(
+    #input_hdf5_path="your_data_with_latent.h5ad",
+    workdir = work_dir + sample_id,
+    sample_name = sample_name,
+    #annotation = "annotation_type" #注释类型
+    # 其他参数...
+)
+run_latent_to_gene(gss_config)

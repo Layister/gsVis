@@ -4,8 +4,7 @@ import time
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
-
-from gsMap.GNN.model import GATModel
+from .model import GATModel
 
 logger = logging.getLogger(__name__)
 

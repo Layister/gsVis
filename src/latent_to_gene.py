@@ -9,8 +9,7 @@ from scipy.stats import gmean, rankdata
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.neighbors import NearestNeighbors
 from tqdm import tqdm, trange
-
-from gsMap.config import LatentToGeneConfig
+from config import LatentToGeneConfig
 
 logger = logging.getLogger(__name__)
 
@@ -148,52 +147,6 @@ def run_latent_to_gene(config: LatentToGeneConfig):
             f"Removed null annotations. Cells retained: {adata.n_obs} (initial: {initial_cell_count})."
         )
 
-    # Homologs transformation
-    if config.homolog_file is not None and config.species is not None:
-        species_col_name = f"{config.species}_homolog"
-
-        # Check if homolog conversion has already been performed
-        if species_col_name in adata.var.columns:
-            logger.warning(
-                f"Column '{species_col_name}' already exists in adata.var. "
-                f"It appears gene names have already been converted to human gene symbols. "
-                f"Skipping homolog transformation."
-            )
-        else:
-            logger.info(f"------Transforming the {config.species} to HUMAN_GENE_SYM...")
-            homologs = pd.read_csv(config.homolog_file, sep="\t")
-            if homologs.shape[1] != 2:
-                raise ValueError(
-                    "Homologs file must have two columns: one for the species and one for the human gene symbol."
-                )
-
-            homologs.columns = [config.species, "HUMAN_GENE_SYM"]
-            homologs.set_index(config.species, inplace=True)
-
-            # original_gene_names = adata.var_names.copy()
-
-            # Filter genes present in homolog file
-            adata = adata[:, adata.var_names.isin(homologs.index)]
-            logger.info(f"{adata.shape[1]} genes retained after homolog transformation.")
-            if adata.shape[1] < 100:
-                raise ValueError("Too few genes retained in ST data (<100).")
-
-            # Create mapping table of original to human gene names
-            gene_mapping = pd.Series(
-                homologs.loc[adata.var_names, "HUMAN_GENE_SYM"].values, index=adata.var_names
-            )
-
-            # Store original species gene names in var dataframe with the suffixed column name
-            adata.var[species_col_name] = adata.var_names.values
-
-            # Convert var_names to human gene symbols
-            adata.var_names = gene_mapping.values
-            adata.var.index.name = "HUMAN_GENE_SYM"
-
-            # Remove duplicated genes after conversion
-            adata = adata[:, ~adata.var_names.duplicated()]
-            logger.info(f"{adata.shape[1]} genes retained after removing duplicates.")
-
     if config.annotation is not None:
         cell_annotations = adata.obs[config.annotation].values
         logger.info(f"Using cell annotations for {len(cell_annotations)} cells.")
@@ -217,16 +170,7 @@ def run_latent_to_gene(config: LatentToGeneConfig):
     if config.gM_slices is not None:
         logger.info("Geometrical mean across multiple slices is provided.")
         gM_df = pd.read_parquet(config.gM_slices)
-        if config.species is not None:
-            homologs = pd.read_csv(config.homolog_file, sep="\t")
-            if homologs.shape[1] < 2:
-                raise ValueError(
-                    "Homologs file must have at least two columns: one for the species and one for the human gene symbol."
-                )
-            homologs.columns = [config.species, "HUMAN_GENE_SYM"]
-            homologs.set_index(config.species, inplace=True)
-            gM_df = gM_df.loc[gM_df.index.isin(homologs.index)]
-            gM_df.index = homologs.loc[gM_df.index, "HUMAN_GENE_SYM"].values
+
         common_genes = np.intersect1d(adata.var_names, gM_df.index)
         gM_df = gM_df.loc[common_genes]
         gM = gM_df["G_Mean"].values
@@ -279,8 +223,10 @@ def run_latent_to_gene(config: LatentToGeneConfig):
     # Normalize the ranks
     ranks /= gM
 
-    def compute_mk_score_wrapper(cell_pos):
-        return compute_regional_mkscore(
+    logger.info("------Computing marker scores...")
+    mk_score = np.zeros((n_cells, n_genes), dtype=np.float16)
+    for cell_pos in trange(n_cells, desc="Calculating marker scores"):
+        mk_score[cell_pos, :] = compute_regional_mkscore(
             cell_pos,
             spatial_net_dict,
             coor_latent,
@@ -291,11 +237,6 @@ def run_latent_to_gene(config: LatentToGeneConfig):
             adata_X_bool,
             pearson_residuals,
         )
-
-    logger.info("------Computing marker scores...")
-    mk_score = np.zeros((n_cells, n_genes), dtype=np.float16)
-    for cell_pos in trange(n_cells, desc="Calculating marker scores"):
-        mk_score[cell_pos, :] = compute_mk_score_wrapper(cell_pos)
 
     mk_score = mk_score.T
     logger.info("Marker scores computed.")

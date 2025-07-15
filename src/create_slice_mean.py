@@ -10,7 +10,7 @@ import zarr
 from scipy.stats import gmean, rankdata
 from tqdm import tqdm
 
-from gsMap.config import CreateSliceMeanConfig
+from config import CreateSliceMeanConfig
 
 # %% Helper functions
 logger = logging.getLogger(__name__)

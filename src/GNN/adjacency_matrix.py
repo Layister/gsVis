@@ -19,7 +19,7 @@ def cal_spatial_net(adata, n_neighbors=5, verbose=True):
     distance = distances.flatten()
     knn_df = pd.DataFrame({"Cell1": cell1, "Cell2": cell2, "Distance": distance})
     knn_df = knn_df[knn_df["Distance"] > 0].copy()
-    cell_id_map = dict(zip(cell_indices, coor.index, strict=False))
+    cell_id_map = dict(zip(cell_indices, coor.index)) # strict=False
     knn_df["Cell1"] = knn_df["Cell1"].map(cell_id_map)
     knn_df["Cell2"] = knn_df["Cell2"].map(cell_id_map)
     return knn_df

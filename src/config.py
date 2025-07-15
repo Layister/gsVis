@@ -11,15 +11,14 @@ from dataclasses import dataclass
 from functools import wraps
 from pathlib import Path
 from pprint import pprint
-from typing import Literal
+from typing import Literal, Union, Optional
 
 import psutil
 import pyfiglet
 import yaml
 
-from gsMap.__init__ import __version__
-
 # Global registry to hold functions
+version = "1.0.0"
 cli_function_registry = OrderedDict()
 subcommand = namedtuple("subcommand", ["name", "func", "add_args_function", "description"])
 
@@ -150,7 +149,7 @@ def register_cli(name: str, description: str, add_args_function: Callable) -> Ca
                 justify="center",
             ).rstrip()
             print(gsMap_main_logo, flush=True)
-            version_number = "Version: " + __version__
+            version_number = "Version: " + version
             print(version_number.center(80), flush=True)
             print("=" * 80, flush=True)
             logger.info(f"Running {name}...")
@@ -442,18 +441,18 @@ def add_report_args(parser):
 
     # Optional arguments for customization
     parser.add_argument(
-        "--fig_width", type=int, default=None, help="Width of the generated figures in pixels."
+        "--fig_width", type=int, default=None, help="Width of the generated BRCA in pixels."
     )
     parser.add_argument(
-        "--fig_height", type=int, default=None, help="Height of the generated figures in pixels."
+        "--fig_height", type=int, default=None, help="Height of the generated BRCA in pixels."
     )
-    parser.add_argument("--point_size", type=int, default=None, help="Point size for the figures.")
+    parser.add_argument("--point_size", type=int, default=None, help="Point size for the BRCA.")
     parser.add_argument(
         "--fig_style",
         type=str,
         default="light",
         choices=["dark", "light"],
-        help="Style of the generated figures.",
+        help="Style of the generated BRCA.",
     )
 
 
@@ -707,7 +706,7 @@ def ensure_path_exists(func):
 @dataclass
 class ConfigWithAutoPaths:
     workdir: str
-    sample_name: str | None
+    sample_name: Optional[str]
 
     def __post_init__(self):
         if self.workdir is None:
@@ -791,12 +790,12 @@ class ConfigWithAutoPaths:
 
 @dataclass
 class CreateSliceMeanConfig:
-    slice_mean_output_file: str | Path
-    h5ad_yaml: str | dict | None = None
-    sample_name_list: list | None = None
-    h5ad_list: list | None = None
-    homolog_file: str | None = None
-    species: str | None = None
+    slice_mean_output_file: Union[str, Path]
+    h5ad_yaml: Union[str, dict, None] = None
+    sample_name_list: Optional[list] = None
+    h5ad_list: Optional[list] = None
+    homolog_file: Optional[str] = None
+    species: Optional[str] = None
     data_layer: str = None
 
     def __post_init__(self):
@@ -835,7 +834,6 @@ class CreateSliceMeanConfig:
         self.slice_mean_output_file = Path(self.slice_mean_output_file)
         self.slice_mean_output_file.parent.mkdir(parents=True, exist_ok=True)
 
-        verify_homolog_file_format(self)
 
 
 @dataclass
@@ -888,7 +886,7 @@ class FindLatentRepresentationsConfig(ConfigWithAutoPaths):
 class LatentToGeneConfig(ConfigWithAutoPaths):
     # input_hdf5_with_latent_path: str
     # output_feather_path: str
-    input_hdf5_path: str | Path = None
+    input_hdf5_path: Union[str, Path] = None
     no_expression_fraction: bool = False
     latent_representation: str = None
     num_neighbour: int = 21
@@ -921,49 +919,24 @@ class LatentToGeneConfig(ConfigWithAutoPaths):
             assert Path(self.gM_slices).exists(), f"{self.gM_slices} does not exist."
             logger.info(f"Using the provided slice mean file: {self.gM_slices}.")
 
-        verify_homolog_file_format(self)
-
-
-def verify_homolog_file_format(config):
-    if config.homolog_file is not None:
-        logger.info(
-            f"User provided homolog file to map gene names to human: {config.homolog_file}"
-        )
-        # check the format of the homolog file
-        with open(config.homolog_file) as f:
-            first_line = f.readline().strip()
-            _n_col = len(first_line.split())
-            if _n_col != 2:
-                raise ValueError(
-                    f"Invalid homolog file format. Expected 2 columns, first column should be other species gene name, second column should be human gene name. "
-                    f"Got {_n_col} columns in the first line."
-                )
-            else:
-                first_col_name, second_col_name = first_line.split()
-                config.species = first_col_name
-                logger.info(
-                    f"Homolog file provided and will map gene name from column1:{first_col_name} to column2:{second_col_name}"
-                )
-    else:
-        logger.info("No homolog file provided. Run in human mode.")
 
 
 @dataclass
 class GenerateLDScoreConfig(ConfigWithAutoPaths):
-    chrom: int | str
+    chrom: Union[int, str]
 
     bfile_root: str
 
     # annotation by gene distance
     gtf_annotation_file: str
     gene_window_size: int = 50000
-    keep_snp_root: str | None = None
+    keep_snp_root: Optional[str] = None
 
     # annotation by enhancer
     enhancer_annotation_file: str = None
     snp_multiple_enhancer_strategy: Literal["max_mkscore", "nearest_TSS"] = "max_mkscore"
     gene_window_enhancer_priority: (
-        Literal["gene_window_first", "enhancer_first", "enhancer_only"] | None
+        Optional[Literal["gene_window_first", "enhancer_first", "enhancer_only"]]
     ) = None
 
     # for calculating ld score
@@ -977,8 +950,8 @@ class GenerateLDScoreConfig(ConfigWithAutoPaths):
     # for pre calculating the SNP Gene ldscore Weight
     save_pre_calculate_snp_gene_weight_matrix: bool = False
 
-    baseline_annotation_dir: str | None = None
-    SNP_gene_pair_dir: str | None = None
+    baseline_annotation_dir: Optional[str] = None
+    SNP_gene_pair_dir: Optional[str] = None
 
     def __post_init__(self):
         # if self.mkscore_feather_file is None:
@@ -1059,23 +1032,23 @@ class GenerateLDScoreConfig(ConfigWithAutoPaths):
 
 @dataclass
 class SpatialLDSCConfig(ConfigWithAutoPaths):
-    w_file: str | None = None
+    w_file: Optional[str] = None
     # ldscore_save_dir: str
     use_additional_baseline_annotation: bool = True
-    trait_name: str | None = None
-    sumstats_file: str | None = None
-    sumstats_config_file: str | None = None
+    trait_name: Optional[str] = None
+    sumstats_file: Optional[str] = None
+    sumstats_config_file: Optional[str] = None
     num_processes: int = 4
     not_M_5_50: bool = False
     n_blocks: int = 200
-    chisq_max: int | None = None
-    all_chunk: int | None = None
-    chunk_range: tuple[int, int] | None = None
+    chisq_max: Optional[int] = None
+    all_chunk: Optional[int] = None
+    chunk_range: Optional[tuple[int, int]] = None
 
     ldscore_save_format: Literal["feather", "quick_mode"] = "feather"
 
     spots_per_chunk_quick_mode: int = 1_000
-    snp_gene_weight_adata_path: str | None = None
+    snp_gene_weight_adata_path: Optional[str] = None
 
     def __post_init__(self):
         super().__post_init__()
@@ -1157,7 +1130,7 @@ class CauchyCombinationConfig(ConfigWithAutoPaths):
     trait_name: str
     annotation: str
     sample_name_list: list[str] = dataclasses.field(default_factory=list)
-    output_file: str | Path | None = None
+    output_file: Union[str, Path, None] = None
 
     def __post_init__(self):
         if self.sample_name is not None:
@@ -1198,11 +1171,11 @@ class DiagnosisConfig(ConfigWithAutoPaths):
     sumstats_file: str
     plot_type: Literal["manhattan", "GSS", "gsMap", "all"] = "all"
     top_corr_genes: int = 50
-    selected_genes: list[str] | None = None
+    selected_genes: Optional[list[str]] = None
 
-    fig_width: int | None = None
-    fig_height: int | None = None
-    point_size: int | None = None
+    fig_width: Optional[int] = None
+    fig_height: Optional[int] = None
+    point_size: Optional[int] = None
     fig_style: Literal["dark", "light"] = "light"
 
     def __post_init__(self):
@@ -1235,18 +1208,18 @@ class RunAllModeConfig(ConfigWithAutoPaths):
     pearson_residuals: bool = False
 
     # == latent 2 Gene PARAMETERS ==
-    gM_slices: str | None = None
+    gM_slices: Optional[str] = None
     latent_representation: str = None
     num_neighbour: int = 21
     num_neighbour_spatial: int = 101
 
     # ==GWAS DATA PARAMETERS==
-    trait_name: str | None = None
-    sumstats_file: str | None = None
-    sumstats_config_file: str | None = None
+    trait_name: Optional[str] = None
+    sumstats_file: Optional[str] = None
+    sumstats_config_file: Optional[str] = None
 
     # === homolog PARAMETERS ===
-    homolog_file: str | None = None
+    homolog_file: Optional[str] = None
 
     max_processes: int = 10
 
@@ -1317,7 +1290,7 @@ class FormatSumstatsConfig:
     se: str = None
     p: str = None
     frq: str = None
-    n: str | int = None
+    n: Union[str, int] = None
     z: str = None
     OR: str = None
     se_OR: str = None
@@ -1328,111 +1301,3 @@ class FormatSumstatsConfig:
     info_min: float = 0.9
     maf_min: float = 0.01
     keep_chr_pos: bool = False
-
-
-@register_cli(
-    name="quick_mode",
-    description="Run the entire gsMap pipeline in quick mode, utilizing pre-computed weights for faster execution.",
-    add_args_function=add_run_all_mode_args,
-)
-def run_all_mode_from_cli(args: argparse.Namespace):
-    from gsMap.run_all_mode import run_pipeline
-
-    config = get_dataclass_from_parser(args, RunAllModeConfig)
-    run_pipeline(config)
-
-
-@register_cli(
-    name="run_find_latent_representations",
-    description="Run Find_latent_representations \nFind the latent representations of each spot by running GNN",
-    add_args_function=add_find_latent_representations_args,
-)
-def run_find_latent_representation_from_cli(args: argparse.Namespace):
-    from gsMap.find_latent_representation import run_find_latent_representation
-
-    config = get_dataclass_from_parser(args, FindLatentRepresentationsConfig)
-    run_find_latent_representation(config)
-
-
-@register_cli(
-    name="run_latent_to_gene",
-    description="Run Latent_to_gene \nEstimate gene marker gene scores for each spot by using latent representations from nearby spots",
-    add_args_function=add_latent_to_gene_args,
-)
-def run_latent_to_gene_from_cli(args: argparse.Namespace):
-    from gsMap.latent_to_gene import run_latent_to_gene
-
-    config = get_dataclass_from_parser(args, LatentToGeneConfig)
-    run_latent_to_gene(config)
-
-
-@register_cli(
-    name="run_generate_ldscore",
-    description="Run Generate_ldscore \nGenerate LD scores for each spot",
-    add_args_function=add_generate_ldscore_args,
-)
-def run_generate_ldscore_from_cli(args: argparse.Namespace):
-    from gsMap.generate_ldscore import run_generate_ldscore
-
-    config = get_dataclass_from_parser(args, GenerateLDScoreConfig)
-    run_generate_ldscore(config)
-
-
-@register_cli(
-    name="run_spatial_ldsc",
-    description="Run Spatial_ldsc \nRun spatial LDSC for each spot",
-    add_args_function=add_spatial_ldsc_args,
-)
-def run_spatial_ldsc_from_cli(args: argparse.Namespace):
-    from gsMap.spatial_ldsc_multiple_sumstats import run_spatial_ldsc
-
-    config = get_dataclass_from_parser(args, SpatialLDSCConfig)
-    run_spatial_ldsc(config)
-
-
-@register_cli(
-    name="run_cauchy_combination",
-    description="Run Cauchy_combination for each annotation",
-    add_args_function=add_Cauchy_combination_args,
-)
-def run_Cauchy_combination_from_cli(args: argparse.Namespace):
-    from gsMap.cauchy_combination_test import run_Cauchy_combination
-
-    config = get_dataclass_from_parser(args, CauchyCombinationConfig)
-    run_Cauchy_combination(config)
-
-
-@register_cli(
-    name="run_report",
-    description="Run Report to generate diagnostic plots and tables",
-    add_args_function=add_report_args,
-)
-def run_Report_from_cli(args: argparse.Namespace):
-    from gsMap.report import run_report
-
-    config = get_dataclass_from_parser(args, ReportConfig)
-    run_report(config)
-
-
-@register_cli(
-    name="format_sumstats",
-    description="Format GWAS summary statistics",
-    add_args_function=add_format_sumstats_args,
-)
-def gwas_format_from_cli(args: argparse.Namespace):
-    from gsMap.format_sumstats import gwas_format
-
-    config = get_dataclass_from_parser(args, FormatSumstatsConfig)
-    gwas_format(config)
-
-
-@register_cli(
-    name="create_slice_mean",
-    description="Create slice mean from multiple h5ad files",
-    add_args_function=add_create_slice_mean_args,
-)
-def create_slice_mean_from_cli(args: argparse.Namespace):
-    from gsMap.create_slice_mean import run_create_slice_mean
-
-    config = get_dataclass_from_parser(args, CreateSliceMeanConfig)
-    run_create_slice_mean(config)
