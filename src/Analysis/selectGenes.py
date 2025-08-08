@@ -601,7 +601,7 @@ def main():
             alpha=args.alpha
         )
     else:
-        print("错误: 请提供--gene、--genes-file或--select-n参数")
+        print("错误: 请提供--gene、--genes-file或--select-n参数等")
         parser.print_help()
 
 

@@ -497,7 +497,7 @@ class GSSGeneSelector:
                 'gene'].tolist()
             print(f"基于空间重复性，保留 {len(reliable_genes)} 个基因")
         else:
-            print("警告：数据中缺少样本批次信息或样本数不足，跳过空间重复性验证")
+            print("警告：数据中缺少样本批次信息，跳过空间重复性验证")
             reliable_genes = initial_genes
 
         # 4. 整合所有验证结果
