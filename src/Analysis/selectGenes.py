@@ -155,7 +155,7 @@ def plot_gene_spatial(mk_score_df, adata, gene_name,
             show=show,
             save=f"{color}_calibrated.png",
             frameon=False,
-            title=f'{gene_name}空间表达分布',
+            title=f'{gene_name}空间表达分布({visual_indicators})',
         )
 
     except Exception as e:
@@ -251,7 +251,7 @@ def select_gene_traditional(mk_score_df, adata, output_dir=None,
 
 def select_gene_statistic(mk_score_df, adata, output_dir=None,
                           min_expr_threshold=0.1, min_gss_threshold=0.5,
-                          corr_threshold=0.7, morans_i_threshold= 0.3):
+                          corr_threshold=0.4, entropy_threshold=0.2, morans_i_threshold=0.3):
     # 初始化选择器
     selector = GSSGeneSelector(
         adata=adata,  # AnnData对象
@@ -260,6 +260,7 @@ def select_gene_statistic(mk_score_df, adata, output_dir=None,
         min_expr_threshold=min_expr_threshold,
         min_gss_threshold=min_gss_threshold,
         corr_threshold=corr_threshold,
+        entropy_threshold=entropy_threshold,
         morans_i_threshold=morans_i_threshold,
     )
 
@@ -369,132 +370,6 @@ def plot_expression_heatmap(mk_score_df, adata, select_n=50, method='gss_expr', 
     plt.close()
 
 
-# def plot_expression_heatmap(mk_score_df, adata, select_n=20, output_dir=None, show=True):
-#     """
-#     绘制GSS值最高的前n个基因的热图
-#
-#     参数:
-#     - mk_score_df: 标记分数DataFrame
-#     - adata: AnnData对象
-#     - select_n: 选择GSS值最高的前n个基因
-#     - output_dir: 图像保存目录
-#     - show: 是否显示图像
-#     """
-#     # 计算每个基因的平均GSS值
-#     mean_gss = mk_score_df.mean(axis=1)
-#
-#     # 获取GSS值最高的前n个基因
-#     top_genes_idx = np.argsort(mean_gss)[-select_n:]
-#     top_genes = mk_score_df.index[top_genes_idx]
-#
-#     # 创建表达矩阵
-#     expr_matrix = pd.DataFrame(
-#         index=adata.obs_names,
-#         columns=top_genes
-#     )
-#
-#     for gene in top_genes:
-#         expr_matrix[gene] = mk_score_df.loc[gene].values
-#
-#     # 创建图形
-#     plt.figure(figsize=(12, 10))
-#
-#     # 绘制热图
-#     sns.heatmap(
-#         expr_matrix,
-#         cmap='viridis',
-#         square=True,
-#         xticklabels=True,
-#         yticklabels=False,
-#         cbar_kws={'label': 'GSS值'}
-#     )
-#
-#     # 设置标题
-#     plt.title(f'GSS值最高的前 {select_n} 个基因的热图')
-#
-#     # 调整布局
-#     plt.tight_layout()
-#
-#     # 保存图像（如果指定了输出目录）
-#     if output_dir:
-#         os.makedirs(output_dir, exist_ok=True)
-#         output_path = os.path.join(output_dir, f'top_{select_n}_genes_heatmap.png')
-#         plt.savefig(output_path, dpi=300, bbox_inches='tight')
-#         print(f"热图已保存至: {output_path}")
-#
-#     # 显示图像
-#     if show:
-#         plt.show()
-#
-#     # 关闭图形
-#     plt.close()
-
-
-# def plot_expression_heatmap(mk_score_df, adata, select_n=20, output_dir=None, show=True):
-#     """
-#     绘制表达量最高的前n个基因的热图
-#
-#     参数:
-#     - mk_score_df: 标记分数DataFrame
-#     - adata: AnnData对象
-#     - select_n: 选择表达量最高的前n个基因
-#     - output_dir: 图像保存目录
-#     - show: 是否显示图像
-#     """
-#     # 计算每个基因的平均表达量
-#     if scipy.sparse.issparse(adata.X):
-#         mean_expr = np.array(adata.X.mean(axis=0)).flatten()
-#     else:
-#         mean_expr = np.mean(adata.X, axis=0)
-#
-#     # 获取表达量最高的前n个基因
-#     top_genes_idx = np.argsort(mean_expr)[-select_n:]
-#     top_genes = adata.var_names[top_genes_idx]
-#
-#     # 创建表达矩阵
-#     expr_matrix = pd.DataFrame(
-#         index=adata.obs_names,
-#         columns=top_genes
-#     )
-#
-#     for gene in top_genes:
-#         expr_matrix[gene] = adata[:, gene].X.toarray().flatten() if scipy.sparse.issparse(adata.X) else adata[:,
-#                                                                                                         gene].X.flatten()
-#
-#     # 创建图形
-#     plt.figure(figsize=(12, 10))
-#
-#     # 绘制热图
-#     sns.heatmap(
-#         expr_matrix,
-#         cmap='viridis',
-#         square=True,
-#         xticklabels=True,
-#         yticklabels=False,
-#         cbar_kws={'label': '表达量'}
-#     )
-#
-#     # 设置标题
-#     plt.title(f'表达量最高的前 {select_n} 个基因的热图')
-#
-#     # 调整布局
-#     plt.tight_layout()
-#
-#     # 保存图像（如果指定了输出目录）
-#     if output_dir:
-#         os.makedirs(output_dir, exist_ok=True)
-#         output_path = os.path.join(output_dir, f'top_{select_n}_genes_heatmap.png')
-#         plt.savefig(output_path, dpi=300, bbox_inches='tight')
-#         print(f"热图已保存至: {output_path}")
-#
-#     # 显示图像
-#     if show:
-#         plt.show()
-#
-#     # 关闭图形
-#     plt.close()
-
-
 def calculate_spatial_purity(adata, genes, cluster_key='annotation_type'):
     """
     计算基因在空间聚类中的表达纯度
@@ -557,31 +432,49 @@ def tissue_type_specificity(adata, genes, tissue_type_key='annotation_type'):
     """
     验证基因在特定细胞类型中的特异性表达
     """
+    # 提取指定基因的表达矩阵（细胞×基因）
+    expr_matrix = adata[:, genes].X.toarray() if isinstance(adata.X, np.ndarray) else adata[:, genes].X.A
+
+    # 构建数据框
+    cell_types = adata.obs[tissue_type_key].values
+
+    # 按组织类型和基因分组计算平均表达量
     specificity = []
+    for i, gene in enumerate(genes):
+        # 每个基因在所有细胞中的表达量
+        gene_expr = expr_matrix[:, i]
 
-    for gene in genes:
-        expr = adata[:, gene].X.toarray().flatten() if scipy.sparse.issparse(adata.X) else adata[:, gene].X.flatten()
-        cell_types = adata.obs[tissue_type_key].values
+        # 按组织类型分组计算平均表达
+        type_expr = {}
+        for tissue_type in np.unique(cell_types):
+            # 提取该组织类型下所有细胞的表达量
+            type_mask = (cell_types == tissue_type)
+            type_expr[tissue_type] = np.mean(gene_expr[type_mask])
 
-        # 计算每个细胞类型的平均表达
-        ct_expr = {}
-        for ct in np.unique(cell_types):
-            mask = cell_types == ct
-            if np.sum(mask) > 0:
-                ct_expr[ct] = np.mean(expr[mask])
+        # 转换为数组便于计算
+        expr_values = np.array(list(type_expr.values()))
+        tissue_types = list(type_expr.keys())
 
-        # 计算特异性指数（最高/最低细胞类型表达比）
-        if ct_expr:
-            max_expr = max(ct_expr.values())
-            min_expr = min(ct_expr.values())
-            specificity_idx = max_expr / min_expr if min_expr > 0 else 0
+        # 计算特异性评分
+        max_expr = np.max(expr_values)
+        mean_expr = np.mean(expr_values)
+
+        # 避免除以零（当所有类型表达量都为0时）
+        if mean_expr < 1e-10:
+            specificity_score = 0.0
         else:
-            specificity_idx = 0
+            specificity_score = max_expr / mean_expr  # 核心公式：最高表达/平均表达
+
+        # 记录最高表达的组织类型
+        max_type = tissue_types[np.argmax(expr_values)]
 
         specificity.append({
             'gene': gene,
-            'specificity_index': specificity_idx,
-            'max_ct_expr': max_expr if ct_expr else 0
+            'specificity_score': specificity_score,
+            'max_expression': max_expr,
+            'mean_expression': mean_expr,
+            'max_expression_type': max_type,
+            'tissue_type_count': len(tissue_types)  # 参与计算的组织类型数量
         })
 
     return pd.DataFrame(specificity)
@@ -610,7 +503,7 @@ def main():
                         help='表达量在综合评分中的权重(0-1)，仅在method=gss_expr时有效')
     parser.add_argument('--downsample-ratio', type=float, default=0.1, help='细胞降采样比例')
     parser.add_argument('--output-dir',
-                        default=f'/Users/wuyang/Documents/MyPaper/3/gsVis/output/{sample_id}/',
+                        default=f'/Users/wuyang/Documents/MyPaper/3/gsVis/output/{sample_id}/selectGenes/',
                         help='图像保存目录')
     parser.add_argument('--cmap', default='viridis', help='颜色映射方案 (默认: viridis)')
     parser.add_argument('--size', type=float, default=1.0, help='点大小 (默认: 1.0)')
@@ -670,10 +563,11 @@ def main():
             selected_genes, _ = select_gene_statistic(
                 mk_score_df, adata,
                 output_dir=args.output_dir,
-                min_expr_threshold=0.0,
-                min_gss_threshold=0.5,
-                corr_threshold=0.1,
-                morans_i_threshold=0.4
+                min_expr_threshold=0.01,
+                min_gss_threshold=0.3,
+                corr_threshold=0.4,
+                entropy_threshold=11.0,
+                morans_i_threshold=0.4,
             )
         elif args.method == "gss_expr":
             # 基于GSS值和表达量可视化基因
@@ -690,23 +584,22 @@ def main():
 
         # 计算各基因在空间聚类中的表达纯度
         purity_scores = calculate_spatial_purity(adata, selected_genes)
-        purity_scores.to_csv(args.output_dir + "purity_scores.csv", index=False)
+        purity_scores.to_csv(args.output_dir + "purity_scores.csv", index=False, sep='\t')
         print(f"各基因在空间聚类中的表达纯度结果已保存至 {args.output_dir}")
 
         # 验证基因在特定细胞类型中的特异性表达
         specificity = tissue_type_specificity(adata, selected_genes)
-        specificity.to_csv(args.output_dir + "specificity.csv", index=False)
+        specificity.to_csv(args.output_dir + "specificity.csv", index=False, sep='\t')
         print(f"基因在特定细胞类型中的特异性表达结果已保存至 {args.output_dir}")
 
         plot_multiple_genes(
             mk_score_df, adata, selected_genes,
             output_dir=args.output_dir,
-            visual_indicators = "Expr", # ["GSS", "Expr"]
+            visual_indicators = "GSS", # ["GSS", "Expr"]
             cmap=args.cmap,
             size=args.size,
             alpha=args.alpha
         )
-
     else:
         print("错误: 请提供--gene、--genes-file或--select-n参数")
         parser.print_help()

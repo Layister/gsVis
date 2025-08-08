@@ -9,6 +9,9 @@ from typing import List, Tuple, Optional
 from scipy.spatial import distance
 import scipy
 import os
+import SpatialDE as sd
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 
 class GSSGeneSelector:
@@ -20,9 +23,11 @@ class GSSGeneSelector:
                  output_dir: str,
                  min_expr_threshold: float = 0.1,
                  min_gss_threshold: float = 0.5,
-                 corr_threshold: float = 0.5,
+                 corr_threshold = 0.4,
+                 entropy_threshold: float = 0.2,
+                 morans_i_threshold: float = 0.3,
                  icc_threshold: float = 0.7,
-                 morans_i_threshold: float = 0.3):
+                 ):
         """
         初始化基因选择器
 
@@ -32,9 +37,10 @@ class GSSGeneSelector:
             output_dir: 输出文件地址
             min_expr_threshold: 最小表达量阈值
             min_gss_threshold: GSS分数阈值
-            corr_threshold: 相关性阈值
-            icc_threshold: 组内相关系数阈值
+            corr_threshold: 相关系数阈值
+            entropy_threshold：GSS信息熵阈值
             morans_i_threshold: Moran's I指数阈值
+            icc_threshold: 组内相关系数阈值
         """
         self.adata = adata
         self.gss_df = gss_df
@@ -42,8 +48,9 @@ class GSSGeneSelector:
         self.min_expr_threshold = min_expr_threshold
         self.min_gss_threshold = min_gss_threshold
         self.corr_threshold = corr_threshold
-        self.icc_threshold = icc_threshold
+        self.entropy_threshold = entropy_threshold
         self.morans_i_threshold = morans_i_threshold
+        self.icc_threshold = icc_threshold
 
         # 确保基因名称匹配
         common_genes = np.intersect1d(adata.var_names, gss_df.index)
@@ -88,39 +95,6 @@ class GSSGeneSelector:
         # 筛选高于GSS阈值的基因
         high_gss_genes = mean_gss[mean_gss > self.min_gss_threshold]
         return high_gss_genes
-
-    def calculate_gss_expression_correlation(self, genes: List[str]) -> pd.DataFrame:
-        """
-        计算GSS分数与表达量的相关性
-
-        参数:
-            genes: 待计算的基因列表
-
-        返回:
-            相关性结果DataFrame
-        """
-        results = []
-
-        for gene in genes:
-            # 获取基因表达量
-            expr = self.adata[:, gene].X
-            if scipy.sparse.issparse(expr):
-                # 使用 toarray() 方法将稀疏矩阵转换为密集矩阵，然后展平
-                expr = expr.toarray().flatten()
-
-            # 获取GSS分数
-            gss = self.gss_df.loc[gene].values
-
-            # 计算皮尔逊相关系数和p值
-            corr, p_value = stats.pearsonr(expr, gss)
-
-            results.append({
-                'gene': gene,
-                'gss_expr_corr': corr,
-                'gss_expr_p_value': p_value
-            })
-
-        return pd.DataFrame(results)
 
     def calculate_spatial_reproducibility(self, genes: List[str]) -> pd.DataFrame:
         """
@@ -193,6 +167,155 @@ class GSSGeneSelector:
 
         return pd.DataFrame(results)
 
+    def calculate_spatial_gene_qval(self, genes: List[str]) -> pd.DataFrame:
+        expr = self.adata[:, genes].to_df()
+        gss = self.gss_df.loc[genes].T
+        coords = self.spatial_coords.values
+        # 运行空间差异表达分析
+        results = sd.run(coords, expr)
+
+        return results
+
+    def calculate_gss_expression_correlation(self, genes: List[str]) -> pd.DataFrame:
+        """
+        计算GSS分数与表达量的相关性
+
+        参数:
+            genes: 待计算的基因列表
+
+        返回:
+            相关性结果DataFrame
+        """
+        results = []
+
+        for gene in genes:
+            # 获取基因表达量
+            expr = self.adata[:, gene].X
+            if scipy.sparse.issparse(expr):
+                # 使用 toarray() 方法将稀疏矩阵转换为密集矩阵，然后展平
+                expr = expr.toarray().flatten()
+
+            # 获取GSS分数
+            gss = self.gss_df.loc[gene].values
+
+            # 计算皮尔逊相关系数和p值
+            corr, p_value = stats.spearmanr(expr, gss)
+
+            results.append({
+                'gene': gene,
+                'gss_expr_corr': corr,
+                'gss_expr_p_value': p_value
+            })
+
+        return pd.DataFrame(results)
+
+    def calculate_genes_entropy(self, genes: List[str]) -> pd.DataFrame:
+        """
+        计算考虑空间距离的加权信息熵（熵值越低，表达越集中且空间聚集性越高）
+        权重基于六边形网格邻居关系，距离越近的细胞对熵值计算贡献越大
+
+        参数:
+            genes: 待计算的基因列表
+
+        返回:
+            DataFrame包含基因名和信息熵值，仅保留熵值低于阈值的基因
+        """
+        # 预计算空间权重矩阵（基于六边形网格结构）
+        # 权重矩阵维度: [n_cells, n_cells]，值越大表示空间距离越近
+        coords = self.spatial_coords.values
+        spatial_weights = self._calculate_hexagonal_weights(coords=coords)
+
+        results = []
+        for gene in genes:
+            # 获取基因表达量（处理稀疏矩阵）
+            expr = self.adata[:, gene].X
+            if scipy.sparse.issparse(expr):
+                expr = expr.toarray().flatten()
+            else:
+                expr = expr.flatten()
+
+            # 1. 先保留真实表达值，真实零表达直接设为 0（区分生物学零和技术噪声）
+            expr = np.where(expr > 0, expr, 0)
+
+            # 2. 计算加权表达量（融入邻居信息）
+            weighted_expr = spatial_weights @ expr
+            expr_threshold = np.max(weighted_expr)/50
+            weighted_expr[weighted_expr < expr_threshold] = 0
+
+            # 可视化
+            #------------------------
+            # # 计算基因的加权表达量分布
+            # n, bins, patches = plt.hist(weighted_expr, bins=50)
+            # plt.title(f"{gene}的加权表达量分布")
+            # plt.show()
+            #
+            # # 随机选一个高表达细胞（加权值>0.5），检查其邻居的原始表达
+            # high_idx = np.argmax(weighted_expr > 0.5)
+            # neighbor_indices = np.nonzero(spatial_weights[high_idx])[0]  # 获取该细胞的邻居
+            #
+            # print("高表达细胞的原始表达:", expr[high_idx])
+            # print("邻居的原始表达均值:", expr[neighbor_indices].mean())
+            # print("邻居的加权表达贡献:", spatial_weights[high_idx, neighbor_indices] @ expr[neighbor_indices])
+            #
+            # # 绘制基因表达的空间分布（原始表达 vs 加权表达）
+            # plt.figure(figsize=(12, 5))
+            # plt.subplot(1, 2, 1)
+            # sns.scatterplot(x=self.spatial_coords['x'], y=self.spatial_coords['y'], hue=expr, palette='viridis')
+            # plt.title("原始表达的空间分布")
+            #
+            # plt.subplot(1, 2, 2)
+            # sns.scatterplot(x=self.spatial_coords['x'], y=self.spatial_coords['y'], hue=weighted_expr,
+            #                 palette='viridis')
+            # plt.title("加权表达的空间分布")
+            # plt.show()
+            #
+            # # 随机选一个细胞，可视化其权重分布
+            # cell_idx = np.random.choice(len(self.spatial_coords))
+            # cell_weight = spatial_weights[cell_idx]
+            #
+            # # 绘制该细胞的邻居权重空间分布
+            # neighbor_coords = self.spatial_coords.iloc[np.nonzero(cell_weight)[0]]
+            # neighbor_weights = cell_weight[np.nonzero(cell_weight)]
+            #
+            # plt.figure(figsize=(8, 6))
+            # sns.scatterplot(x=self.spatial_coords['x'], y=self.spatial_coords['y'], color='gray', alpha=0.2)
+            # sns.scatterplot(x=neighbor_coords['x'], y=neighbor_coords['y'], hue=neighbor_weights, palette='viridis')
+            # plt.title(f"细胞 {cell_idx} 的空间权重分布")
+            # plt.legend(title='权重值')
+            # plt.show()
+            #
+            # # 计算每个细胞的概率占比，并排序
+            # prob = weighted_expr / weighted_expr.sum()
+            # sorted_prob = np.sort(prob)[::-1]  # 降序排列
+            #
+            # # 绘制概率分布的“长尾图”
+            # plt.plot(sorted_prob, color='blue')
+            # plt.yscale('log')  # 对数轴更易观察长尾
+            # plt.title("加权概率分布的长尾")
+            # plt.show()
+            # ------------------------
+
+            # 3. 归一化时处理零值，避免除零错误
+            total_weighted = np.sum(weighted_expr)
+            if total_weighted < 1e-10:  # 所有表达都是 0（极端情况）
+                weighted_prob = np.zeros_like(weighted_expr)
+            else:
+                weighted_prob = weighted_expr / total_weighted
+                # 强制极低值为 0，还原真实零表达的影响
+                weighted_prob[weighted_prob < 1e-10] = 0
+
+            # 4. 计算加权信息熵H = -Σp*log2(p)时，给 log 加保护（避免零值的 log 错误）
+            weighted_entropy = -np.sum(
+                weighted_prob * np.log2(weighted_prob + 1e-10)
+            )
+
+            results.append({
+                'gene': gene,
+                'entropy': weighted_entropy
+            })
+
+        return pd.DataFrame(results)
+
     def calculate_morans_i(self, genes: List[str]) -> pd.DataFrame:
         """
         计算基因表达的Moran's I指数（空间自相关性）
@@ -233,7 +356,7 @@ class GSSGeneSelector:
         #     w_rowsum[isolated] = 1  # 避免除0
         # w /= w_rowsum[:, None]
 
-        w = self.calculate_hexagonal_weights(coords=coords)
+        w = self._calculate_hexagonal_weights(coords=coords)
 
         # 4. 预计算全局常量
         results = []
@@ -265,7 +388,7 @@ class GSSGeneSelector:
 
         return pd.DataFrame(results)
 
-    def calculate_hexagonal_weights(self, coords, max_rings=4, decay_rate=0.5, tolerance=0.1):
+    def _calculate_hexagonal_weights(self, coords, max_rings=2, decay_rate=0.1, tolerance=0.05):
         """
         为六边形网格结构计算空间权重，支持多环邻居
 
@@ -345,20 +468,29 @@ class GSSGeneSelector:
 
         print(f"初步筛选出 {len(initial_genes)} 个基因")
 
-        # 3. 计算GSS与表达量的相关性
+        # ---------
+        # 运行空间差异表达分析
+        #spatial_results = self.calculate_spatial_gene_qval(initial_genes)
+        # 筛选显著的空间特异性基因（q值<0.05）
+        #high_spatialde_genes = spatial_results[spatial_results['qval'] < 0.05].index.tolist()
+        # ---------
+
+        # 3.1 计算GSS与表达量的相关性
         corr_results = self.calculate_gss_expression_correlation(initial_genes)
         high_corr_genes = corr_results[corr_results['gss_expr_corr'] > self.corr_threshold]['gene'].tolist()
-
         print(f"基于GSS-表达量相关性，保留 {len(high_corr_genes)} 个基因")
 
-        # 4. 计算空间自相关性
+        # 3.2 计算GSS的信息熵
+        entropy_results = self.calculate_genes_entropy(initial_genes)
+        high_entropy_genes = entropy_results[entropy_results['entropy'] < self.entropy_threshold]['gene'].tolist()
+        print(f"基于GSS的信息熵，保留 {len(high_entropy_genes)} 个基因")
+
+        # 3.3 计算空间自相关性
         morans_i_results = self.calculate_morans_i(initial_genes)
+        high_spatial_genes = morans_i_results[morans_i_results['morans_i'] > self.morans_i_threshold]['gene'].tolist()
+        print(f"基于空间自相关性，保留 {len(high_spatial_genes)} 个基因")
 
-        spatial_genes = morans_i_results[morans_i_results['morans_i'] > self.morans_i_threshold]['gene'].tolist()
-
-        print(f"基于空间自相关性，保留 {len(spatial_genes)} 个基因")
-
-        # 5. 计算空间重复性（如果有多个样本）
+        # 3.4 计算空间重复性（如果有多个样本）
         if 'sample' in self.adata.obs.columns and len(self.adata.obs['sample'].unique()) >= 2:
             reproducibility_results = self.calculate_spatial_reproducibility(initial_genes)
             reliable_genes = reproducibility_results[reproducibility_results['icc'] > self.icc_threshold][
@@ -368,37 +500,51 @@ class GSSGeneSelector:
             print("警告：数据中缺少样本批次信息或样本数不足，跳过空间重复性验证")
             reliable_genes = initial_genes
 
-        # 6. 整合所有验证结果
-        intersection_genes = list(filter(lambda x: x in high_corr_genes, spatial_genes))
-        union_genes = high_corr_genes + [x for x in spatial_genes if x not in spatial_genes]
+        # 4. 整合所有验证结果
+        # 取所有通过至少一项验证的基因
+        all_validated_genes = list(
+            set(high_corr_genes) | set(high_entropy_genes) | set(high_spatial_genes)
+        )
+
+        # 构建完整的验证结果DataFrame
         all_results = pd.DataFrame({
-            'gene': union_genes,
-            'pass_gss_expr_corr': [g in high_corr_genes for g in union_genes],
-            'pass_spatial_autocorr': [g in spatial_genes for g in union_genes],
-            #'pass_spatial_repro': [g in reliable_genes for g in union_genes],
-            #'pass_marker_corr': [g in validated_genes for g in union_genes]
+            'gene': all_validated_genes,
+            'pass_gss_expr_corr': [g in high_corr_genes for g in all_validated_genes],
+            'pass_entropy': [g in high_entropy_genes for g in all_validated_genes],
+            'pass_spatial_autocorr': [g in high_spatial_genes for g in all_validated_genes],
         })
 
         # 计算每个基因通过的验证数量
         all_results['count'] = all_results.iloc[:, 1:].sum(axis=1)
 
         # 提取每个基因的GSS-表达量相关性
-        corr_dict = {row['gene']: row['gss_expr_corr'] for _, row in corr_results.iterrows()}
+        corr_dict = {row['gene']: round(row['gss_expr_corr'], 2) for _, row in corr_results.iterrows()}
         all_results['gss_expr_corr'] = all_results['gene'].map(corr_dict)
 
+        # 提取每个基因的信息熵分数
+        entropy_dict = {row['gene']: round(row['entropy'], 2) for _, row in entropy_results.iterrows()}
+        all_results['entropy'] = all_results['gene'].map(entropy_dict)
+
         # 提取每个基因的空间自相关系数
-        morans_i_dict = {row['gene']: row['morans_i'] for _, row in morans_i_results.iterrows()}
+        morans_i_dict = {row['gene']: round(row['morans_i'], 2) for _, row in morans_i_results.iterrows()}
         all_results['morans_i'] = all_results['gene'].map(morans_i_dict)
 
         # 按验证数量和相关性排序
         all_results = all_results.sort_values(
-            ['count', 'gss_expr_corr', 'morans_i'],
-            ascending=[False, False, False]
+            ['count', 'gss_expr_corr', 'entropy', 'morans_i'],
+            ascending=[False, False, False, False]
         )
+
+        # 通过所有验证的基因
+        intersection_genes = all_results[
+            (all_results['pass_gss_expr_corr']) &
+            (all_results['pass_entropy']) &
+            (all_results['pass_spatial_autocorr'])
+            ]['gene'].tolist()
 
         if self.output_dir:
             os.makedirs(self.output_dir, exist_ok=True)
-        all_results.to_csv(self.output_dir+"selected_genes.csv", index=False)
+        all_results.to_csv(self.output_dir+"selected_genes.csv", index=False, sep='\t')
         print(f"验证结果已保存至 {self.output_dir}")
 
         return intersection_genes, all_results
