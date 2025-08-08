@@ -511,7 +511,7 @@ class GSSGeneSelector:
             'gene': all_validated_genes,
             'pass_gss_expr_corr': [g in high_corr_genes for g in all_validated_genes],
             'pass_entropy': [g in high_entropy_genes for g in all_validated_genes],
-            'pass_spatial_autocorr': [g in high_spatial_genes for g in all_validated_genes],
+            'pass_spatial_auto_corr': [g in high_spatial_genes for g in all_validated_genes],
         })
 
         # 计算每个基因通过的验证数量

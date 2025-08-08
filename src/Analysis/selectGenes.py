@@ -566,7 +566,7 @@ def main():
                 min_expr_threshold=0.01,
                 min_gss_threshold=0.3,
                 corr_threshold=0.4,
-                entropy_threshold=11.0,
+                entropy_threshold=10.99,
                 morans_i_threshold=0.4,
             )
         elif args.method == "gss_expr":

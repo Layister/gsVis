@@ -516,7 +516,7 @@ def main():
         mk_score_df, adata, selected_genes,
         high_specificity_genes_per_cell,
         output_dir=args.output_dir,
-        visual_indicators="Expr", # ["GSS", "Expr"]
+        visual_indicators="GSS", # ["GSS", "Expr"]
         cmap=args.cmap,
         size=args.size,
         alpha=args.alpha
