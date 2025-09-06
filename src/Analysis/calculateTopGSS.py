@@ -1,216 +1,285 @@
+
 import os
 import argparse
+import numpy as np
 import pandas as pd
 import scanpy as sc
+import matplotlib.pyplot as plt
+from scipy.stats import skew, kurtosis
 from scipy.stats import gaussian_kde
 from scipy.signal import find_peaks
-import matplotlib.font_manager as fm
-import matplotlib.pyplot as plt
-import numpy as np
+from src.Utils.DataProcess import get_self_data_dir, get_hest_data_dir, set_chinese_font, read_data
+from src.Utils.GssGeneCalculator import GssGeneCalculator
 
 
-def set_chinese_font():
-    """设置可用的中文字体"""
-    available_fonts = [f.name for f in fm.fontManager.ttflist]
+def get_high_specificity_genes_kde_single_cell(gss_values, min_peak_height=0.05):
+    """
+    单个细胞的KDE法筛选高特异性基因
+    逻辑：通过核密度估计找到GSS值分布的峰值，取峰值右侧显著下降后的高值基因
+    参数：
+    - gss_values: 单个细胞的GSS值（pandas Series，索引为基因名）
+    - min_peak_height: 检测峰值的最小高度阈值（归一化后）
+    返回：
+    - 筛选出的高特异性基因列表
+    """
+    # 提取非零GSS值（零值无意义）
+    non_zero_gss = gss_values[gss_values > 0].sort_values(ascending=False)
 
-    # 定义常用中文字体列表
-    chinese_fonts = ["SimHei", "WenQuanYi Micro Hei", "Heiti TC", "Microsoft YaHei", "Arial Unicode MS"]
+    # 核密度估计（KDE）
+    kde = gaussian_kde(non_zero_gss.values)
+    x = np.linspace(non_zero_gss.min(), non_zero_gss.max(), 1000)  # GSS值范围
+    y = kde(x)  # 密度值
+    y_norm = y / y.max()  # 归一化到0-1，便于统一阈值
 
-    # 查找第一个可用的中文字体
-    for font in chinese_fonts:
-        if font in available_fonts:
-            plt.rcParams["font.family"] = font
-            print(f"已设置中文字体: {font}")
-            return
+    # 检测峰值（高特异性基因可能形成独立峰值）
+    peaks, peak_info = find_peaks(y_norm, height=min_peak_height)
 
-    print("警告: 未找到可用的中文字体，中文可能无法正确显示")
-    print(f"可用字体示例: {available_fonts[:10]}")
+    # 选择最高的峰值作为主峰值（最可能的高特异性基因分布中心）
+    main_peak_idx = peaks[np.argmax(peak_info['peak_heights'])]
+    main_peak_gss = x[main_peak_idx]
 
+    # 找到峰值右侧密度下降到峰值1%的位置作为阈值（动态比例）
+    right_of_peak = x[x >= main_peak_gss]  # 仅看峰值右侧
+    right_density = y_norm[x >= main_peak_gss]
+    threshold_idx = np.argmax(right_density <= 0.01 * peak_info['peak_heights'].max())
 
-def read_data(feather_path, h5ad_path):
-    """读取latent_to_gene.py生成的两个文件"""
-    # 读取标记分数文件
-    print(f"读取标记分数文件: {feather_path}")
-    mk_score_df = pd.read_feather(feather_path)
-
-    # 检查数据结构
-    if pd.api.types.is_numeric_dtype(mk_score_df.index):
-        print("检测到DataFrame使用数字索引，尝试从第一列获取基因名...")
-
-        # 检查第一列是否包含字符串类型的基因名
-        first_column = mk_score_df.iloc[:, 0]
-        if pd.api.types.is_string_dtype(first_column):
-            # 将第一列设置为索引
-            mk_score_df = mk_score_df.set_index(mk_score_df.columns[0])
-            print(f"已将第一列 '{mk_score_df.index.name}' 设置为基因名索引")
-        else:
-            print("警告: 第一列不是字符串类型，无法作为基因名")
-            print(f"第一列数据类型: {first_column.dtype}")
-            print(f"第一列前5个值: {first_column.head().tolist()}")
-            print("继续使用数字索引，但这可能导致后续处理错误")
-
-    # 读取AnnData对象
-    print(f"读取AnnData对象: {h5ad_path}")
-    adata = sc.read_h5ad(h5ad_path)
-
-    # 确保基因名称类型一致（转换为字符串）
-    print("确保基因名称类型一致...")
-    mk_score_df.index = mk_score_df.index.astype(str)
-    adata.var_names = adata.var_names.astype(str)
-
-    # 检查数据一致性
-    print(f"标记分数DataFrame中的基因数量: {len(mk_score_df.index)}")
-    print(f"AnnData对象中的基因数量: {len(adata.var_names)}")
-
-    # 先比较长度
-    if len(mk_score_df.index) != len(adata.var_names):
-        print("警告: 标记分数DataFrame和AnnData的基因数量不匹配")
-
-        # 计算共同基因
-        common_genes = np.intersect1d(mk_score_df.index, adata.var_names)
-        print(f"找到 {len(common_genes)} 个共同基因")
-
-        # 计算各自独有的基因
-        only_in_mk_score = np.setdiff1d(mk_score_df.index, adata.var_names)
-        only_in_adata = np.setdiff1d(adata.var_names, mk_score_df.index)
-
-        print(f"仅存在于标记分数文件中的基因数量: {len(only_in_mk_score)}")
-        print(f"仅存在于AnnData文件中的基因数量: {len(only_in_adata)}")
-
-        # 打印一些示例基因
-        if len(only_in_mk_score) > 0:
-            print(f"仅存在于标记分数文件中的基因示例: {', '.join(only_in_mk_score[:5])}")
-        if len(only_in_adata) > 0:
-            print(f"仅存在于AnnData文件中的基因示例: {', '.join(only_in_adata[:5])}")
-
-        # 筛选共同基因
-        print("筛选共同基因以继续分析...")
-        mk_score_df = mk_score_df.loc[common_genes]
-        adata = adata[:, common_genes].copy()
+    if threshold_idx == 0:  # 未找到下降点时，用峰值作为阈值
+        threshold = main_peak_gss
     else:
-        # 长度相同但内容可能不同
-        if not np.all(mk_score_df.index == adata.var_names):
-            print("警告: 标记分数DataFrame和AnnData的基因索引顺序不完全匹配")
-            # 找到不匹配的位置
-            mismatches = np.where(mk_score_df.index != adata.var_names)[0]
-            print(f"找到 {len(mismatches)} 个不匹配的基因位置")
-            if len(mismatches) > 0:
-                print(f"前5个不匹配的位置: {mismatches[:5]}")
-                print(
-                    f"对应的基因: {mk_score_df.index[mismatches[0]]} (标记分数) vs {adata.var_names[mismatches[0]]} (AnnData)")
+        threshold = right_of_peak[threshold_idx]
 
-            # 重新排序以匹配
-            print("重新排序基因以匹配...")
-            adata = adata[:, mk_score_df.index].copy()
-
-    print(f"处理后的数据: 基因数量 = {len(mk_score_df.index)}, 细胞数量 = {adata.shape[0]}")
-    return mk_score_df, adata
+    # 返回阈值以上的基因
+    return non_zero_gss[non_zero_gss >= threshold].index.tolist()
 
 
-def get_high_specificity_genes_kde(mk_score_df, adata):
-    high_specificity_genes_per_cell = {}
-    for cell in adata.obs_names:
-        gss_values = mk_score_df[cell]
-        non_zero_gss = gss_values[gss_values > 0]
-        if len(non_zero_gss) > 0:
-            # 进行核密度估计
+def get_high_specificity_genes_nd_single_cell(gss_values, multiplier=9, use_median=False):
+    """
+    单个细胞的均值+标准差（或中位数+四分位距）筛选法
+    逻辑：取显著高于整体水平的基因（适应偏态分布）
+    参数：
+    - gss_values: 单个细胞的GSS值（pandas Series，索引为基因名）
+    - multiplier: 倍数（标准差或四分位距的倍数）
+    - use_median: 是否使用中位数+四分位距（适合偏态分布）
+    返回：
+    - 筛选出的高特异性基因列表
+    """
+    # 提取非零GSS值
+    non_zero_gss = gss_values[gss_values > 0]
+
+    # 计算阈值（根据分布类型选择方法）
+    if use_median:
+        # 中位数+四分位距（适合偏态分布，抗极端值）
+        median = np.median(non_zero_gss.values)
+        iqr = np.percentile(non_zero_gss.values, 75) - np.percentile(non_zero_gss.values, 25)
+        threshold = median + multiplier * iqr
+    else:
+        # 均值+标准差（适合近似正态分布）
+        mean = np.mean(non_zero_gss.values)
+        std = np.std(non_zero_gss.values)
+        threshold = mean + multiplier * std
+
+    # 确保阈值不低于最大GSS值的1%（避免阈值过高导致无结果）
+    threshold = max(threshold, non_zero_gss.max() * 0.01)
+    return non_zero_gss[non_zero_gss >= threshold].index.tolist()
+
+
+def get_high_specificity_genes_top_n_single_cell(gss_values, top_n=10, min_threshold=None):
+    """
+    单个细胞的Top-N筛选法
+    逻辑：取GSS值最高的N个基因（结合绝对阈值避免低质量基因）
+    参数：
+    - gss_values: 单个细胞的GSS值（pandas Series，索引为基因名）
+    - top_n: 最多返回的基因数量
+    - min_threshold: 最低GSS值阈值（低于此值的基因即使排名靠前也排除）
+    返回：
+    - 筛选出的高特异性基因列表
+    """
+    # 降序排列所有基因（包括零值，但零值会被过滤）
+    sorted_gss = gss_values.sort_values(ascending=False)
+    # 过滤零值
+    sorted_gss = sorted_gss[sorted_gss > 0]
+
+    # 应用绝对阈值（如果设置）
+    if min_threshold is not None:
+        sorted_gss = sorted_gss[sorted_gss >= min_threshold]
+
+    # 取前N个（如果不足N个则返回全部）
+    n = min(top_n, len(sorted_gss))
+    return sorted_gss.head(n).index.tolist()
+
+
+def get_distribution_features(gss_values, min_peak_height=0.05, visualize=True):
+    """
+    分析GSS值的分布特征，可选可视化分布曲线及关键指标
+    参数：
+    - gss_values: 单个细胞的GSS值（pandas Series）
+    - min_peak_height: 检测峰值的最小高度阈值（归一化后）
+    - visualize: 是否生成可视化图
+    返回：
+    - features: 分布特征字典
+    """
+    non_zero_gss = gss_values[gss_values > 0].values
+    n_non_zero = len(non_zero_gss)
+
+    # 1. 基础统计特征计算
+    if n_non_zero == 0:
+        features = {
+            "n_non_zero": 0,
+            "skewness": 0,  # 偏度（正值=右偏，负值=左偏，0=对称）
+            "kurtosis": 0,  # 峰度（正值=尖峰，负值=平峰，0=正态）
+            "n_peaks": 0,  # KDE检测到的峰值数量
+            "has_high_tail": False,  # 是否有高值尾部（前0.5%高值/中位值 > 1.3）
+            "mean": 0,
+            "median": 0,
+            "top10p": 0
+        }
+    else:
+        mean_gss = np.mean(non_zero_gss)
+        median_gss = np.median(non_zero_gss)
+        top5p_gss = np.percentile(non_zero_gss, 99.5)  # 前0.5%高值阈值
+
+        features = {
+            "n_non_zero": n_non_zero,
+            "skewness": skew(non_zero_gss),
+            "kurtosis": kurtosis(non_zero_gss),
+            "mean": mean_gss,
+            "median": median_gss,
+            "top5p": top5p_gss,
+            "has_high_tail": (top5p_gss / median_gss) > 1.3  # 高值尾部判断
+        }
+
+        # 2. KDE峰值检测（仅当非零值足够多时）
+        if n_non_zero >= 100:  # 数据量太少时不检测峰值（避免噪声）
             kde = gaussian_kde(non_zero_gss)
             x = np.linspace(non_zero_gss.min(), non_zero_gss.max(), 1000)
             y = kde(x)
-            # 找到峰值
-            peaks, _ = find_peaks(y)
-            if len(peaks) > 0:
-                peak_values = x[peaks]
-                # 选择最大的峰值
-                main_peak = peak_values[np.argmax(y[peaks])]
-                # 自动确定阈值，例如取峰值右侧下降到一定比例的值
-                right_of_peak = x[x > main_peak]
-                kde_right_of_peak = kde(right_of_peak)
-                # 假设下降到峰值的20%作为阈值
-                threshold_index = np.argmax(kde_right_of_peak < 0.01 * kde(main_peak))
-                if threshold_index > 0:
-                    threshold = right_of_peak[threshold_index]
-                    top_genes = non_zero_gss[non_zero_gss > threshold].index.tolist()
-                    high_specificity_genes_per_cell[cell] = top_genes
-                else:
-                    high_specificity_genes_per_cell[cell] = []
-            else:
-                high_specificity_genes_per_cell[cell] = []
+            y_norm = y / y.max()  # 归一化到0-1（方便统一峰值高度阈值）
+            peaks, peak_info = find_peaks(y_norm, height=min_peak_height)
+            features["n_peaks"] = len(peaks)
+            features["kde_x"] = x  # 保存KDE曲线x轴（用于可视化）
+            features["kde_y"] = y  # 保存KDE曲线y轴
+            features["peaks_x"] = x[peaks] if len(peaks) > 0 else []  # 峰值对应的GSS值
         else:
-            high_specificity_genes_per_cell[cell] = []
-    return high_specificity_genes_per_cell
+            features["n_peaks"] = 0
+            features["kde_x"] = None
+            features["kde_y"] = None
+            features["peaks_x"] = []
+
+    # 3. 可视化分布（若开启）
+    if visualize:
+
+        # 绘制子图：1行2列（直方图+KDE曲线 + 统计指标标注）
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+
+        # 子图1：直方图+KDE曲线+峰值标记
+        if n_non_zero > 0:
+            # 直方图（展示原始数据分布）
+            ax1.hist(non_zero_gss, bins=min(20, n_non_zero // 2), edgecolor="black", alpha=0.6, label="GSS值直方图")
+            # KDE曲线（平滑分布）
+            if features["kde_x"] is not None:
+                ax1.plot(features["kde_x"], features["kde_y"], color="red", linewidth=2, label="KDE分布曲线")
+                # 标记峰值
+                if len(features["peaks_x"]) > 0:
+                    for peak_x in features["peaks_x"]:
+                        ax1.axvline(x=peak_x, color="orange", linestyle="--", linewidth=1.5,
+                                    label="峰值" if peak_x == features["peaks_x"][0] else "")
+            # 标注均值和中位数
+            ax1.axvline(x=features["mean"], color="blue", linestyle="-", linewidth=1.5,
+                        label=f"均值: {features['mean']:.3f}")
+            ax1.axvline(x=features["median"], color="green", linestyle="-", linewidth=1.5,
+                        label=f"中位数: {features['median']:.3f}")
+
+        ax1.set_xlabel("GSS值")
+        ax1.set_ylabel("频数/密度")
+        ax1.set_title(f"GSS值分布（非零值数量: {n_non_zero}）")
+        ax1.legend(fontsize=8)
+        ax1.grid(alpha=0.3)
+
+        # 子图2：关键分布特征文本标注（方便快速判断）
+        text_content = [
+            f"非零GSS值数量: {features['n_non_zero']}",
+            f"偏度 (Skewness): {features['skewness']:.3f}",
+            f"峰度 (Kurtosis): {features['kurtosis']:.3f}",
+            f"峰值数量: {features['n_peaks']}",
+            f"有高值尾部: {'是' if features['has_high_tail'] else '否'}",
+            f"前0.5%高值阈值: {features['top5p']:.3f}"
+        ]
+        # 文本分行显示
+        ax2.text(0.1, 0.9, "\n".join(text_content), transform=ax2.transAxes,
+                 fontsize=10, verticalalignment="top",
+                 bbox=dict(boxstyle="round", facecolor="lightgray", alpha=0.5))
+        ax2.set_xlim(0, 1)
+        ax2.set_ylim(0, 1)
+        ax2.axis("off")  # 隐藏坐标轴
+        ax2.set_title("分布特征指标")
+
+        # 展示图像
+        plt.tight_layout()
+        plt.show()
+
+    return features
 
 
-def get_high_specificity_genes_elbow(mk_score_df, adata):
-    high_specificity_genes_per_cell = {}
-    for cell in adata.obs_names:
-        gss_values = mk_score_df[cell]
-        non_zero_gss = gss_values[gss_values > 0].sort_values(ascending=False)
-        if len(non_zero_gss) > 0:
-            # 计算累积和
-            cumulative_sum = np.cumsum(non_zero_gss)
-            total_sum = cumulative_sum[-1]
-            # 计算每个点的“曲率”
-            curvature = []
-            window_size = 3  # 调整窗口大小
-            for i in range(window_size, len(non_zero_gss) - window_size):
-                x0, y0 = i - window_size, cumulative_sum[i - window_size] / total_sum
-                x1, y1 = i, cumulative_sum[i] / total_sum
-                x2, y2 = i + window_size, cumulative_sum[i + window_size] / total_sum
-                curvature.append(abs((x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0)))
-            # 找到曲率最大的点
-            if curvature:
-                elbow_index = np.argmax(curvature) + window_size
-                top_genes = non_zero_gss.head(elbow_index).index.tolist()
-                high_specificity_genes_per_cell[cell] = top_genes
-            else:
-                high_specificity_genes_per_cell[cell] = []
-        else:
-            high_specificity_genes_per_cell[cell] = []
-    return high_specificity_genes_per_cell
-
-
-def get_high_specificity_genes_no_zero(mk_score_df, adata, multiplier=4):
-    high_specificity_genes_per_cell = {}
-    for cell in adata.obs_names:
-        gss_values = mk_score_df[cell]
-        non_zero_gss = gss_values[gss_values > 0]
-        if len(non_zero_gss) > 0:
-            mean_gss = non_zero_gss.mean()
-            std_gss = non_zero_gss.std()
-            threshold = mean_gss + multiplier * std_gss
-            top_genes = gss_values[gss_values > threshold].index.tolist()
-        else:
-            top_genes = []
-        high_specificity_genes_per_cell[cell] = top_genes
-    return high_specificity_genes_per_cell
-
-
-def get_high_specificity_genes_top_n(mk_score_df, adata, top_n=10):
+def select_best_method(features):
     """
-    根据GSS值为每个细胞找到高特异性基因列表
-
-    参数:
-    - mk_score_df: 标记分数DataFrame (GSS值)
-    - adata: AnnData对象
-    - top_n: 每个细胞选择的高特异性基因数量
-
-    返回:
-    - high_specificity_genes_per_cell: 每个细胞对应的高特异性基因列表的字典
+    根据分布特征选择最合适的筛选方法
+    返回方法名称及对应的参数
     """
-    high_specificity_genes_per_cell = {}
+    # 规则1：非零值太少 → 直接用Top-N（最稳健）
+    if features["n_non_zero"] < 100:
+        return "top_n", {"top_n": 5}  # 非零值少，只取前n
 
-    # 遍历每个细胞
+    # 规则2：有明显多峰（≥2个峰值）→ KDE法（适合区分多簇分布）
+    if features["n_peaks"] >= 2:
+        return "kde", {}  # KDE法默认参数
+
+    # 规则3：高度偏态（偏度>2）且有高值尾部 → Top-N法（适合长尾分布）
+    if features["skewness"] > 2 and features["has_high_tail"]:
+        # 偏度越大，取的N越小（避免纳入太多低质量基因）
+        topn = 5 if features["skewness"] < 4 else 3
+        return "topn", {"top_n": topn}
+
+    # 规则4：近似正态分布（偏度<1.5）→ 均值+标准差法（适合对称分布）
+    if abs(features["skewness"]) < 1.5:
+        # 峰度越高（峰值越尖），倍数"multiplier"越低（避免漏筛）
+        return "std", {"use_median":False}
+
+    # 规则5：其他情况（如单峰、中等偏态）→ 中位数+四分位距法（抗极端值，适合中等偏态）
+    return "iqr", {"use_median":True}
+
+
+def dynamic_select_high_specific_genes(mk_score_df, adata):
+    """
+    动态为每个细胞选择最佳筛选方法，返回高特异性基因
+    """
+    high_specific_genes_per_cell = {}
+
     for cell in adata.obs_names:
-        # 获取该细胞对应的GSS值
         gss_values = mk_score_df[cell]
+        # 1. 计算当前细胞GSS值的分布特征
+        features = get_distribution_features(gss_values, visualize=False)
 
-        # 根据GSS值排序，选择前top_n个基因
-        top_genes = gss_values.sort_values(ascending=False).head(top_n).index.tolist()
+        # 2. 根据特征选择最佳方法
+        method_name, params = select_best_method(features)
+        #print(method_name)
 
-        high_specificity_genes_per_cell[cell] = top_genes
+        # 3. 调用对应方法筛选基因
+        if method_name == "kde":
+            genes = get_high_specificity_genes_kde_single_cell(gss_values)
+        elif method_name == "iqr":
+            genes = get_high_specificity_genes_nd_single_cell(gss_values, **params)
+        elif method_name == "std":
+            genes = get_high_specificity_genes_nd_single_cell(gss_values, **params)
+        elif method_name == "topn":
+            genes = get_high_specificity_genes_top_n_single_cell(gss_values, **params)
+        else:
+            genes = []  # 无匹配方法时返回空
 
-    return high_specificity_genes_per_cell
+        high_specific_genes_per_cell[cell] = genes
+        # 可选：打印日志，查看每个细胞选择的方法
+        # print(f"细胞 {cell} 选择方法: {method_name}, 特征: {features}")
+
+    return high_specific_genes_per_cell
 
 
 def calculate_adaptive_threshold(gene_counts, visualize=True, output_dir=None):
@@ -274,67 +343,6 @@ def calculate_adaptive_threshold(gene_counts, visualize=True, output_dir=None):
     return max(10, threshold)  # 设置最小阈值，避免筛选过少基因
 
 
-# def plot_gene_spatial(mk_score_df, adata, gene_name, high_specificity_genes_per_cell,
-#                       output_dir=None, visual_indicators=None,
-#                       cmap='viridis', size=0.8, alpha=0.8,
-#                       background_alpha=0.7, show=True):
-#     """使用 Scanpy 内置方法可视化特定基因表达并叠加病理切片"""
-#     # 基因存在性检查
-#     if gene_name not in adata.var_names:
-#         print(f"错误: 基因 '{gene_name}' 不在数据中")
-#         return
-#
-#     # 检查空间坐标
-#     if 'spatial' not in adata.obsm:
-#         print("错误: 缺少空间坐标信息")
-#         return
-#
-#     # 创建新的AnnData对象，只包含高特异性基因列表中包含该基因的细胞
-#     cells_with_gene = [cell for cell, genes in high_specificity_genes_per_cell.items() if gene_name in genes]
-#     adata_subset = adata[cells_with_gene].copy()
-#
-#     if len(adata_subset) == 0:
-#         print(f"没有细胞的高特异性基因列表中包含基因 '{gene_name}'")
-#         return
-#
-#     # 获取基因表达值
-#     if visual_indicators == "GSS" and gene_name in mk_score_df.index:
-#         print(f"基因 '{gene_name}' 使用GSS分数数据")
-#         obs_column_name = f"Marker_score_{gene_name}"
-#         adata_subset.obs[obs_column_name] = mk_score_df.loc[gene_name, cells_with_gene].values
-#         color = obs_column_name
-#     else:
-#         print(f"基因 '{gene_name}' 使用原始基因表达值")
-#         color = gene_name  # 直接使用 adata.var_names 中的基因
-#
-#     # 创建输出目录
-#     if output_dir:
-#         os.makedirs(output_dir, exist_ok=True)
-#
-#     # 使用 Scanpy 的空间可视化函数
-#     try:
-#         # 设置 Scanpy 保存路径
-#         if output_dir:
-#             sc.settings.figdir = output_dir
-#
-#         sc.pl.spatial(
-#             adata_subset,
-#             color=color,
-#             cmap=cmap,
-#             size=size,
-#             alpha=alpha,
-#             img_key='hires',
-#             alpha_img=background_alpha,
-#             show=show,
-#             save=f"{color}_calibrated.png",
-#             frameon=False,
-#             title=f'{gene_name}空间表达分布({visual_indicators})'
-#         )
-#
-#     except Exception as e:
-#         print(f"可视化失败: {e}")
-
-
 def plot_gene_spatial(mk_score_df, adata, gene_name, high_specificity_genes_per_cell,
                       output_dir=None, visual_indicators=None,
                       cmap='viridis', size=0.8, alpha=0.8,
@@ -365,10 +373,6 @@ def plot_gene_spatial(mk_score_df, adata, gene_name, high_specificity_genes_per_
         new_df = pd.DataFrame(new_columns, index=adata.obs.index)
         adata.obs = pd.concat([adata.obs, new_df], axis=1)
 
-    # 创建输出目录
-    if output_dir:
-        os.makedirs(output_dir, exist_ok=True)
-
     # 获取所有细胞的空间坐标
     spatial_coords = adata.obsm['spatial']
 
@@ -396,25 +400,28 @@ def plot_gene_spatial(mk_score_df, adata, gene_name, high_specificity_genes_per_
     if visual_indicators == "GSS" and obs_column_name not in adata_subset.obs.columns:
         adata_subset.obs[obs_column_name] = mk_score_df.loc[gene_name, adata_subset.obs_names].values
 
+    # 创建输出目录
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+
     # 使用 Scanpy 的空间可视化函数
     try:
-        # 设置 Scanpy 保存路径
-        if output_dir:
-            sc.settings.figdir = output_dir
-
-        sc.pl.spatial(
+        fig = sc.pl.spatial(
             adata_subset,
-            color=color,
             cmap=cmap,
-            size=size,
-            alpha=alpha,
-            img_key='hires',
+            color=color,
+            # size=size,
+            # alpha=alpha,
             alpha_img=background_alpha,
+            img_key='downscaled_fullres',  # 'hires'
+            title=f'{gene_name}空间表达分布({visual_indicators})',
+            return_fig=True,
+            frameon=True,
             show=show,
-            save=f"{color}_calibrated.png",
-            frameon=False,
-            title=f'{gene_name}空间表达分布({visual_indicators})'
         )
+
+        fig.savefig(os.path.join(output_dir, f"_{color}_calibrated.png"), dpi=400)
+        plt.close(fig)
 
     except Exception as e:
         print(f"可视化失败: {e}")
@@ -453,23 +460,44 @@ def plot_multiple_genes(mk_score_df, adata, gene_names, high_specificity_genes_p
 
 
 def main():
-    # 地址
-    work_dir = "/Users/wuyang/Documents/MyPaper/3/gsVis/data"
-    sample_id = "BRCA"
-    sample_name = "Human_Breast_Cancer"
+    # 分析方式
+    method = 'calculateTopGSS'
+
+    # Mus musculus
+    # LIHB:NCBI627, MEL:ZEN81, PRAD:NCBI793, SKCM:NCBI689
+
+    # Homo sapiens
+    # ACYC:NCBI771, ALL:TENX134, BLCA:NCBI855, CESC:TENX50, COAD:TENX156,
+    # COADREAD:TENX139, CSCC:NCBI770, EPM:NCBI641, GBM:TENX138, HCC:TENX120,
+    # HGSOC:TENX142, IDC:TENX99, ILC :TENX96, LNET:TENX72, LUAD:TENX141,
+    # LUSC:TENX62, PAAD:TENX140, PRAD:TENX157, PRCC:TENX105, READ:ZEN49,
+    # SCCRCC:INT24, SKCM:TENX158,
+
+    # 本地数据地址
+    work_dir = '/Users/wuyang/Documents/MyPaper/3/gsVis'
+    sample_id = 'BRCA'
+    sample_name = 'Human_Breast_Cancer'
+
+    # HEST数据地址
+    dataset = 'HEST'
+    species = 'Homo sapiens'  # 'Mus musculus'
+    cancer = 'ACYC'  # 'LIHB'
+    id = 'NCBI771'  # 'NCBI627'
+
+    # feather_path, h5ad_path, output_dir = (
+    #     get_self_data_dir(method, work_dir, sample_name, sample_id))
+
+    feather_path, h5ad_path, output_dir = (
+        get_hest_data_dir(method, work_dir, dataset, species, cancer, id))
+
 
     # 创建命令行参数解析器
     parser = argparse.ArgumentParser(description='可视化基因在特定spot上的表达分布')
-    parser.add_argument('--feather-path',
-                        default=f'{work_dir}/{sample_id}/{sample_name}/latent_to_gene/{sample_name}_gene_marker_score.feather',
-                        help='标记分数feather文件路径')
-    parser.add_argument('--h5ad-path',
-                        default=f'{work_dir}/{sample_id}/{sample_name}/find_latent_representations/{sample_name}_add_latent.h5ad',
-                        help='AnnData h5ad文件路径')
+    parser.add_argument('--feather-path',default=feather_path, help='标记分数feather文件路径')
+    parser.add_argument('--h5ad-path', default=h5ad_path, help='AnnData h5ad文件路径')
+    parser.add_argument('--output-dir', default=output_dir, help='图像保存目录')
+
     parser.add_argument('--top-n', type=int, default=10, help='每个细胞选择的高特异性基因数量')
-    parser.add_argument('--output-dir',
-                        default=f'/Users/wuyang/Documents/MyPaper/3/gsVis/output/{sample_id}/calculateTopGSS/',
-                        help='图像保存目录')
     parser.add_argument('--cmap', default='viridis', help='颜色映射方案 (默认: viridis)')
     parser.add_argument('--size', type=float, default=1.0, help='点大小 (默认: 1.0)')
     parser.add_argument('--alpha', type=float, default=0.6, help='透明度 (默认: 0.7)')
@@ -484,16 +512,7 @@ def main():
     # 读取数据
     mk_score_df, adata = read_data(args.feather_path, args.h5ad_path)
 
-    # 筛选取出各细胞GSS值的top n基因
-    # high_specificity_genes_per_cell = get_high_specificity_genes_top_n(mk_score_df, adata, top_n=args.top_n)
-    # 使用非零值的均值和标准差作为阈值
-    high_specificity_genes_per_cell = get_high_specificity_genes_no_zero(mk_score_df, adata, multiplier=4)
-
-    # 例如使用肘部法则方法
-    # high_specificity_genes_per_cell = get_high_specificity_genes_elbow(mk_score_df, adata)
-    # 例如使用核密度估计检测
-    # high_specificity_genes_per_cell = get_high_specificity_genes_kde(mk_score_df, adata)
-
+    high_specificity_genes_per_cell = dynamic_select_high_specific_genes(mk_score_df, adata)
 
     # 获取所有高特异性基因
     all_high_specificity_genes = set()
@@ -507,9 +526,25 @@ def main():
         for gene in genes:
             gene_counts[gene] += 1
 
-    # 筛选出现次数大于等于阈值的基因
-    min_count = calculate_adaptive_threshold(gene_counts=gene_counts, visualize=True, output_dir=args.output_dir)
-    selected_genes = [gene for gene, count in gene_counts.items() if count >= min_count]
+    # 获取筛选的阈值
+    adaptive_threshold = calculate_adaptive_threshold(gene_counts=gene_counts, visualize=True, output_dir=args.output_dir)
+    filtered_genes_len = len([key for key, value in gene_counts.items() if value >= adaptive_threshold])
+    print(f"占据50%的度的频率阈值是{adaptive_threshold},有{filtered_genes_len}个基因通过筛选（仅供展示）！！！")
+
+    # 初始化选择器
+    selector = GssGeneCalculator(
+        adata=adata,
+        gene_counts=gene_counts,
+        spatial_top_pct=5,
+        spatial_threshold=0.1,
+        cluster_threshold=0.8
+    )
+
+    # 筛选具有特定空间表达模式的基因
+    selected_genes, results = selector.run_pipeline()
+
+    results.to_csv(args.output_dir + "_selected_genes.csv", index=False, sep='\t')
+    print(f"验证结果已保存至 {args.output_dir}")
 
     # 可视化这些基因的空间表达模式
     plot_multiple_genes(
@@ -521,6 +556,8 @@ def main():
         size=args.size,
         alpha=args.alpha
     )
+
+    print(selected_genes)
 
 
 if __name__ == "__main__":

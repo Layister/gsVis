@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 
-class GSSGeneSelector:
+class GssGeneSelector:
     """基于GSS分数的基因选择与验证工具"""
 
     def __init__(self,
@@ -23,6 +23,7 @@ class GSSGeneSelector:
                  output_dir: str,
                  min_expr_threshold: float = 0.1,
                  min_gss_threshold: float = 0.5,
+                 concentration_threshold = 90,
                  corr_threshold = 0.4,
                  entropy_threshold: float = 0.2,
                  morans_i_threshold: float = 0.3,
@@ -37,6 +38,7 @@ class GSSGeneSelector:
             output_dir: 输出文件地址
             min_expr_threshold: 最小表达量阈值
             min_gss_threshold: GSS分数阈值
+            concentration_threshold: 表达离散度和集中性阈值
             corr_threshold: 相关系数阈值
             entropy_threshold：GSS信息熵阈值
             morans_i_threshold: Moran's I指数阈值
@@ -47,6 +49,7 @@ class GSSGeneSelector:
         self.output_dir = output_dir
         self.min_expr_threshold = min_expr_threshold
         self.min_gss_threshold = min_gss_threshold
+        self.concentration_threshold = concentration_threshold
         self.corr_threshold = corr_threshold
         self.entropy_threshold = entropy_threshold
         self.morans_i_threshold = morans_i_threshold
@@ -175,6 +178,67 @@ class GSSGeneSelector:
         results = sd.run(coords, expr)
 
         return results
+
+    def calculate_expression_concentration(self, genes: list) -> pd.DataFrame:
+        """
+        计算基因的表达集中性综合评分（融合离散指数和表达占比集中度）
+        参数：
+            genes: 待分析的基因列表
+        返回：包含原始指标和综合评分的DataFrame
+        """
+        top_k = 0.05  # 前5%细胞的表达占比
+        results = []
+
+        for gene in genes:
+            # 1. 提取基因表达量
+            if scipy.sparse.issparse(self.adata.X):
+                expr = self.adata[:, gene].X.A.flatten()
+            else:
+                expr = self.adata[:, gene].X.flatten()
+
+            # 2. 计算表达离散指数（VMR）
+            mean_expr = np.mean(expr)
+            var_expr = np.var(expr)
+            if mean_expr < 1e-10:
+                disp_index = np.inf
+            else:
+                disp_index = var_expr / mean_expr
+
+            # 3. 计算表达占比集中度
+            sorted_expr = np.sort(expr)[::-1]
+            top_n = max(1, int(len(expr) * top_k))
+            top_sum = np.sum(sorted_expr[:top_n])
+            total_sum = np.sum(sorted_expr)
+            concentration_ratio = top_sum / total_sum if total_sum >= 1e-10 else 0.0
+
+            results.append({
+                'gene': gene,
+                'dispersion_index': disp_index,
+                'concentration_ratio': concentration_ratio
+            })
+
+        # 转换为DataFrame并处理极端值
+        df = pd.DataFrame(results)
+
+        # 4. 指标归一化（映射到0-1范围）
+        # 离散指数：值越大越好（取倒数后归一化，避免inf影响）
+        df['dispersion_norm'] = 1 / (1 + df['dispersion_index'])  # 转换为0-1（值越大越集中）
+        # 集中率：值越大越好（直接归一化）
+        cr_max, cr_min = df['concentration_ratio'].max(), df['concentration_ratio'].min()
+        df['concentration_norm'] = (df['concentration_ratio'] - cr_min) / (cr_max - cr_min + 1e-10)  # 0-1归一化
+
+        # 5. 融合为综合评分（采用排名平均，避免主观权重）
+        # 对两个归一化指标分别排名（升序=1,2,3...）
+        df['disp_rank'] = df['dispersion_norm'].rank(ascending=False)  # 高离散归一值排名靠前
+        df['cr_rank'] = df['concentration_norm'].rank(ascending=False)  # 高集中率排名靠前
+        # 综合评分为排名的平均值（值越小表示综合表现越好）
+        df['combined_score'] = (df['disp_rank'] + df['cr_rank']) / 2
+
+        # 可选：将综合评分转换为0-100的分数（越高越好）
+        max_score = df['combined_score'].max()
+        df['concentration_score'] = 100 * (1 - df['combined_score'] / max_score)
+
+        return df[['gene', 'concentration_score']]
 
     def calculate_gss_expression_correlation(self, genes: List[str]) -> pd.DataFrame:
         """
@@ -470,10 +534,15 @@ class GSSGeneSelector:
 
         # ---------
         # 运行空间差异表达分析
-        #spatial_results = self.calculate_spatial_gene_qval(initial_genes)
-        # 筛选显著的空间特异性基因（q值<0.05）
-        #high_spatialde_genes = spatial_results[spatial_results['qval'] < 0.05].index.tolist()
+        # spatial_results = self.calculate_spatial_gene_qval(initial_genes)
+        # # 筛选显著的空间特异性基因（q值<0.05）
+        # high_spatialde_genes = spatial_results[spatial_results['qval'] < 0.05].index.tolist()
         # ---------
+
+        # 3.0 计算表达离散度和集中性指标
+        concentration_results = self.calculate_expression_concentration(initial_genes)
+        high_concentration_genes = concentration_results[concentration_results['concentration_score'] > self.concentration_threshold]['gene'].tolist()
+        print(f"基于表达离散度和集中性，保留 {len(high_concentration_genes)} 个基因")
 
         # 3.1 计算GSS与表达量的相关性
         corr_results = self.calculate_gss_expression_correlation(initial_genes)
@@ -503,12 +572,16 @@ class GSSGeneSelector:
         # 4. 整合所有验证结果
         # 取所有通过至少一项验证的基因
         all_validated_genes = list(
-            set(high_corr_genes) | set(high_entropy_genes) | set(high_spatial_genes)
+            set(high_concentration_genes) |
+            set(high_corr_genes) |
+            set(high_entropy_genes) |
+            set(high_spatial_genes)
         )
 
         # 构建完整的验证结果DataFrame
         all_results = pd.DataFrame({
             'gene': all_validated_genes,
+            'pass_concentration': [g in high_concentration_genes for g in all_validated_genes],
             'pass_gss_expr_corr': [g in high_corr_genes for g in all_validated_genes],
             'pass_entropy': [g in high_entropy_genes for g in all_validated_genes],
             'pass_spatial_auto_corr': [g in high_spatial_genes for g in all_validated_genes],
@@ -516,6 +589,10 @@ class GSSGeneSelector:
 
         # 计算每个基因通过的验证数量
         all_results['count'] = all_results.iloc[:, 1:].sum(axis=1)
+
+        # 提取每个基因的表达离散度和集中性归一化分数
+        concentration_dict = {row['gene']: round(row['concentration_score'], 2) for _, row in concentration_results.iterrows()}
+        all_results['concentration_score'] = all_results['gene'].map(concentration_dict)
 
         # 提取每个基因的GSS-表达量相关性
         corr_dict = {row['gene']: round(row['gss_expr_corr'], 2) for _, row in corr_results.iterrows()}
@@ -531,20 +608,22 @@ class GSSGeneSelector:
 
         # 按验证数量和相关性排序
         all_results = all_results.sort_values(
-            ['count', 'gss_expr_corr', 'entropy', 'morans_i'],
-            ascending=[False, False, False, False]
+            ['count', 'concentration_score', 'gss_expr_corr', 'entropy', 'morans_i'],
+            ascending=[False, False, False, False, False]
         )
 
         # 通过所有验证的基因
-        intersection_genes = all_results[
+        cross_genes = all_results[
+            (all_results['pass_concentration']) &
             (all_results['pass_gss_expr_corr']) &
             (all_results['pass_entropy']) &
-            (all_results['pass_spatial_autocorr'])
+            (all_results['pass_spatial_auto_corr'])
             ]['gene'].tolist()
+        print(f"一共有{len(cross_genes)}个基因通过了全部的筛选流程：{cross_genes}")
 
         if self.output_dir:
             os.makedirs(self.output_dir, exist_ok=True)
-        all_results.to_csv(self.output_dir+"selected_genes.csv", index=False, sep='\t')
+        all_results.to_csv(self.output_dir+"_selected_genes.csv", index=False, sep='\t')
         print(f"验证结果已保存至 {self.output_dir}")
 
-        return intersection_genes, all_results
+        return all_validated_genes, all_results

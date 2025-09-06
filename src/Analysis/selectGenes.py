@@ -6,191 +6,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
 import scipy
-import matplotlib.font_manager as fm
-from src.Utils.GSSGeneSelector import GSSGeneSelector
-import shutil
-
-
-def set_chinese_font():
-    """设置可用的中文字体"""
-    available_fonts = [f.name for f in fm.fontManager.ttflist]
-
-    # 定义常用中文字体列表
-    chinese_fonts = ["SimHei", "WenQuanYi Micro Hei", "Heiti TC", "Microsoft YaHei", "Arial Unicode MS"]
-
-    # 查找第一个可用的中文字体
-    for font in chinese_fonts:
-        if font in available_fonts:
-            plt.rcParams["font.family"] = font
-            print(f"已设置中文字体: {font}")
-            return
-
-    print("警告: 未找到可用的中文字体，中文可能无法正确显示")
-    print(f"可用字体示例: {available_fonts[:10]}")
-
-
-def read_data(feather_path, h5ad_path):
-    """读取latent_to_gene.py生成的两个文件"""
-    # 读取标记分数文件
-    print(f"读取标记分数文件: {feather_path}")
-    mk_score_df = pd.read_feather(feather_path)
-
-    # 检查数据结构
-    if pd.api.types.is_numeric_dtype(mk_score_df.index):
-        print("检测到DataFrame使用数字索引，尝试从第一列获取基因名...")
-
-        # 检查第一列是否包含字符串类型的基因名
-        first_column = mk_score_df.iloc[:, 0]
-        if pd.api.types.is_string_dtype(first_column):
-            # 将第一列设置为索引
-            mk_score_df = mk_score_df.set_index(mk_score_df.columns[0])
-            print(f"已将第一列 '{mk_score_df.index.name}' 设置为基因名索引")
-        else:
-            print("警告: 第一列不是字符串类型，无法作为基因名")
-            print(f"第一列数据类型: {first_column.dtype}")
-            print(f"第一列前5个值: {first_column.head().tolist()}")
-            print("继续使用数字索引，但这可能导致后续处理错误")
-
-    # 读取AnnData对象
-    print(f"读取AnnData对象: {h5ad_path}")
-    adata = sc.read_h5ad(h5ad_path)
-
-    # 确保基因名称类型一致（转换为字符串）
-    print("确保基因名称类型一致...")
-    mk_score_df.index = mk_score_df.index.astype(str)
-    adata.var_names = adata.var_names.astype(str)
-
-    # 检查数据一致性
-    print(f"标记分数DataFrame中的基因数量: {len(mk_score_df.index)}")
-    print(f"AnnData对象中的基因数量: {len(adata.var_names)}")
-
-    # 先比较长度
-    if len(mk_score_df.index) != len(adata.var_names):
-        print("警告: 标记分数DataFrame和AnnData的基因数量不匹配")
-
-        # 计算共同基因
-        common_genes = np.intersect1d(mk_score_df.index, adata.var_names)
-        print(f"找到 {len(common_genes)} 个共同基因")
-
-        # 计算各自独有的基因
-        only_in_mk_score = np.setdiff1d(mk_score_df.index, adata.var_names)
-        only_in_adata = np.setdiff1d(adata.var_names, mk_score_df.index)
-
-        print(f"仅存在于标记分数文件中的基因数量: {len(only_in_mk_score)}")
-        print(f"仅存在于AnnData文件中的基因数量: {len(only_in_adata)}")
-
-        # 打印一些示例基因
-        if len(only_in_mk_score) > 0:
-            print(f"仅存在于标记分数文件中的基因示例: {', '.join(only_in_mk_score[:5])}")
-        if len(only_in_adata) > 0:
-            print(f"仅存在于AnnData文件中的基因示例: {', '.join(only_in_adata[:5])}")
-
-        # 筛选共同基因
-        print("筛选共同基因以继续分析...")
-        mk_score_df = mk_score_df.loc[common_genes]
-        adata = adata[:, common_genes].copy()
-    else:
-        # 长度相同但内容可能不同
-        if not np.all(mk_score_df.index == adata.var_names):
-            print("警告: 标记分数DataFrame和AnnData的基因索引顺序不完全匹配")
-            # 找到不匹配的位置
-            mismatches = np.where(mk_score_df.index != adata.var_names)[0]
-            print(f"找到 {len(mismatches)} 个不匹配的基因位置")
-            if len(mismatches) > 0:
-                print(f"前5个不匹配的位置: {mismatches[:5]}")
-                print(
-                    f"对应的基因: {mk_score_df.index[mismatches[0]]} (标记分数) vs {adata.var_names[mismatches[0]]} (AnnData)")
-
-            # 重新排序以匹配
-            print("重新排序基因以匹配...")
-            adata = adata[:, mk_score_df.index].copy()
-
-    print(f"处理后的数据: 基因数量 = {len(mk_score_df.index)}, 细胞数量 = {adata.shape[0]}")
-    return mk_score_df, adata
-
-
-def plot_gene_spatial(mk_score_df, adata, gene_name,
-                      output_dir=None, visual_indicators = None,
-                      cmap='viridis', size=0.8, alpha=0.8,
-                      background_alpha=0.7, show=True):
-    """使用 Scanpy 内置方法可视化特定基因表达并叠加病理切片"""
-    # 基因存在性检查
-    if gene_name not in adata.var_names:
-        print(f"错误: 基因 '{gene_name}' 不在数据中")
-        return
-
-    # 检查空间坐标
-    if 'spatial' not in adata.obsm:
-        print("错误: 缺少空间坐标信息")
-        return
-
-    # 获取基因表达值
-    if visual_indicators == "GSS" and gene_name in mk_score_df.index:
-        print(f"基因 '{gene_name}' 使用GSS分数数据")
-        obs_column_name = f"Marker_score_{gene_name}"
-        adata.obs[obs_column_name] = mk_score_df.loc[gene_name].values
-        color = obs_column_name
-    else:
-        print(f"基因 '{gene_name}' 使用原始基因表达值")
-        color = gene_name  # 直接使用 adata.var_names 中的基因
-
-    # 创建输出目录
-    if output_dir:
-        os.makedirs(output_dir, exist_ok=True)
-
-    # 使用 Scanpy 的空间可视化函数
-    try:
-        # 设置 Scanpy 保存路径
-        if output_dir:
-            sc.settings.figdir = output_dir
-
-        sc.pl.spatial(
-            adata,
-            color=color,
-            cmap=cmap,
-            size=size,
-            alpha=alpha,
-            img_key='hires',
-            alpha_img=background_alpha,
-            show=show,
-            save=f"{color}_calibrated.png",
-            frameon=False,
-            title=f'{gene_name}空间表达分布({visual_indicators})',
-        )
-
-    except Exception as e:
-        print(f"可视化失败: {e}")
-
-
-def plot_multiple_genes(mk_score_df, adata, gene_names,
-                        output_dir=None, visual_indicators = None,
-                        cmap='viridis', size=0.8, alpha=0.8,
-                        background_alpha=0.7, show=False):
-    """
-    可视化多个基因在空间上的表达分布
-
-    参数:
-    - mk_score_df: 标记分数DataFrame
-    - adata: AnnData对象
-    - gene_names: 要可视化的基因名称列表
-    - output_dir: 图像保存目录
-    - cmap: 颜色映射
-    - size: 点大小
-    - alpha: 透明度
-    """
-    for gene_name in gene_names:
-        plot_gene_spatial(
-            mk_score_df, adata, gene_name,
-            output_dir=output_dir,
-            visual_indicators=visual_indicators,
-            cmap=cmap,
-            size=size,
-            alpha=alpha,
-            background_alpha=background_alpha,
-            show=show  # 批量绘制时不显示，提高效率
-        )
-
-    print(f"已完成 {len(gene_names)} 个基因的可视化")
+from src.Utils.GssGeneSelector import GssGeneSelector
+from src.Utils.DataProcess import get_self_data_dir, get_hest_data_dir, set_chinese_font, read_data
 
 
 def select_gene_traditional(mk_score_df, adata, output_dir=None,
@@ -251,14 +68,16 @@ def select_gene_traditional(mk_score_df, adata, output_dir=None,
 
 def select_gene_statistic(mk_score_df, adata, output_dir=None,
                           min_expr_threshold=0.1, min_gss_threshold=0.5,
-                          corr_threshold=0.4, entropy_threshold=0.2, morans_i_threshold=0.3):
+                          concentration_threshold = 90, corr_threshold=0.4,
+                          entropy_threshold=0.2, morans_i_threshold=0.3):
     # 初始化选择器
-    selector = GSSGeneSelector(
+    selector = GssGeneSelector(
         adata=adata,  # AnnData对象
         gss_df=mk_score_df,  # GSS分数矩阵
         output_dir=output_dir,
         min_expr_threshold=min_expr_threshold,
         min_gss_threshold=min_gss_threshold,
+        concentration_threshold=concentration_threshold,
         corr_threshold=corr_threshold,
         entropy_threshold=entropy_threshold,
         morans_i_threshold=morans_i_threshold,
@@ -480,20 +299,125 @@ def tissue_type_specificity(adata, genes, tissue_type_key='annotation_type'):
     return pd.DataFrame(specificity)
 
 
+def plot_gene_spatial(mk_score_df, adata, gene_name,
+                      output_dir=None, visual_indicators = None,
+                      cmap='viridis', size=0.8, alpha=0.8,
+                      background_alpha=0.7, show=True):
+    """使用 Scanpy 内置方法可视化特定基因表达并叠加病理切片"""
+    # 基因存在性检查
+    if gene_name not in adata.var_names:
+        print(f"错误: 基因 '{gene_name}' 不在数据中")
+        return
+
+    # 检查空间坐标
+    if 'spatial' not in adata.obsm:
+        print("错误: 缺少空间坐标信息")
+        return
+
+    # 获取基因表达值
+    if visual_indicators == "GSS" and gene_name in mk_score_df.index:
+        print(f"基因 '{gene_name}' 使用GSS分数数据")
+        obs_column_name = f"Marker_score_{gene_name}"
+        adata.obs[obs_column_name] = mk_score_df.loc[gene_name].values
+        color = obs_column_name
+    else:
+        print(f"基因 '{gene_name}' 使用原始基因表达值")
+        color = gene_name  # 直接使用 adata.var_names 中的基因
+
+    # 创建输出目录
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+
+    # 使用 Scanpy 的空间可视化函数
+    try:
+        fig = sc.pl.spatial(
+            adata,
+            cmap=cmap,
+            color=color,
+            # size=size,
+            # alpha=alpha,
+            alpha_img=background_alpha,
+            img_key='downscaled_fullres', # 'hires'
+            title=f'{gene_name}空间表达分布({visual_indicators})',
+            return_fig = True,
+            frameon=True,
+            show=show,
+        )
+
+        fig.savefig(os.path.join(output_dir, f"{color}_calibrated.png"), dpi=400)
+        plt.close(fig)
+
+    except Exception as e:
+        print(f"可视化失败: {e}")
+
+
+def plot_multiple_genes(mk_score_df, adata, gene_names,
+                        output_dir=None, visual_indicators = None,
+                        cmap='viridis', size=0.8, alpha=0.8,
+                        background_alpha=0.7, show=False):
+    """
+    可视化多个基因在空间上的表达分布
+
+    参数:
+    - mk_score_df: 标记分数DataFrame
+    - adata: AnnData对象
+    - gene_names: 要可视化的基因名称列表
+    - output_dir: 图像保存目录
+    - cmap: 颜色映射
+    - size: 点大小
+    - alpha: 透明度
+    """
+    for gene_name in gene_names:
+        plot_gene_spatial(
+            mk_score_df, adata, gene_name,
+            output_dir=output_dir,
+            visual_indicators=visual_indicators,
+            cmap=cmap,
+            size=size,
+            alpha=alpha,
+            background_alpha=background_alpha,
+            show=show  # 批量绘制时不显示，提高效率
+        )
+
+    print(f"已完成 {len(gene_names)} 个基因的可视化")
+
+
 def main():
-    # 地址
-    work_dir = "/Users/wuyang/Documents/MyPaper/3/gsVis/data"
-    sample_id = "BRCA"
-    sample_name = "Human_Breast_Cancer"
+
+    #分析方式
+    method = 'selectGenes'
+
+    # Mus musculus
+    # LIHB:NCBI627, MEL:ZEN81, PRAD:NCBI793, SKCM:NCBI689
+
+    # Homo sapiens
+    # ACYC:NCBI771, ALL:TENX134, BLCA:NCBI855, CESC:TENX50, COAD:TENX156,
+    # COADREAD:TENX139, CSCC:NCBI770, EPM:NCBI641, GBM:TENX138, HCC:TENX120,
+    # HGSOC:TENX142, IDC:TENX99, ILC :TENX96, LNET:TENX72, LUAD:TENX141
+
+    # 本地数据地址
+    work_dir = '/Users/wuyang/Documents/MyPaper/3/gsVis'
+    sample_id = 'BRCA'
+    sample_name = 'Human_Breast_Cancer'
+
+    # HEST数据地址
+    dataset = 'HEST'
+    species = 'Homo sapiens'  # 'Mus musculus'
+    cancer = 'ACYC'  # 'LIHB'
+    id = 'NCBI771'  # 'NCBI627'
+
+    # feather_path, h5ad_path, output_dir = (
+    #     get_self_data_dir(method, work_dir, sample_name, sample_id))
+
+    feather_path, h5ad_path, output_dir = (
+        get_hest_data_dir(method, work_dir, dataset, species, cancer, id))
 
     # 创建命令行参数解析器
     parser = argparse.ArgumentParser(description='可视化基因在空间上的表达分布')
-    parser.add_argument('--feather-path',
-                        default=f'{work_dir}/{sample_id}/{sample_name}/latent_to_gene/{sample_name}_gene_marker_score.feather',
-                        help='标记分数feather文件路径')
-    parser.add_argument('--h5ad-path',
-                        default=f'{work_dir}/{sample_id}/{sample_name}/find_latent_representations/{sample_name}_add_latent.h5ad',
-                        help='AnnData h5ad文件路径')
+    parser.add_argument('--feather-path', default=feather_path, help='标记分数feather文件路径')
+    parser.add_argument('--h5ad-path', default=h5ad_path, help='AnnData h5ad文件路径')
+    parser.add_argument('--output-dir', default=output_dir, help='图像保存目录')
+
     parser.add_argument('--gene', help='要可视化的基因名称')
     parser.add_argument('--genes-file', help='包含多个基因名称的文件路径，每行一个基因')
     parser.add_argument('--select-n', type=int, default=10, help='可视化值得分析的n个基因')
@@ -502,9 +426,6 @@ def main():
     parser.add_argument('--expr-weight', type=float, default=0.1,
                         help='表达量在综合评分中的权重(0-1)，仅在method=gss_expr时有效')
     parser.add_argument('--downsample-ratio', type=float, default=0.1, help='细胞降采样比例')
-    parser.add_argument('--output-dir',
-                        default=f'/Users/wuyang/Documents/MyPaper/3/gsVis/output/{sample_id}/selectGenes/',
-                        help='图像保存目录')
     parser.add_argument('--cmap', default='viridis', help='颜色映射方案 (默认: viridis)')
     parser.add_argument('--size', type=float, default=1.0, help='点大小 (默认: 1.0)')
     parser.add_argument('--alpha', type=float, default=0.6, help='透明度 (默认: 0.7)')
@@ -564,10 +485,11 @@ def main():
                 mk_score_df, adata,
                 output_dir=args.output_dir,
                 min_expr_threshold=0.01,
-                min_gss_threshold=0.3,
-                corr_threshold=0.4,
-                entropy_threshold=10.99,
-                morans_i_threshold=0.4,
+                min_gss_threshold=0.1,
+                concentration_threshold=90, # 表达离散度和集中性阈值
+                corr_threshold=0.6, # GSS-表达量相关性阈值
+                entropy_threshold=8.5, # GSS的信息熵阈值
+                morans_i_threshold=0.5, # 空间自相关性阈值
             )
         elif args.method == "gss_expr":
             # 基于GSS值和表达量可视化基因
@@ -582,15 +504,15 @@ def main():
 
         print(selected_genes)
 
-        # 计算各基因在空间聚类中的表达纯度
-        purity_scores = calculate_spatial_purity(adata, selected_genes)
-        purity_scores.to_csv(args.output_dir + "purity_scores.csv", index=False, sep='\t')
-        print(f"各基因在空间聚类中的表达纯度结果已保存至 {args.output_dir}")
-
-        # 验证基因在特定细胞类型中的特异性表达
-        specificity = tissue_type_specificity(adata, selected_genes)
-        specificity.to_csv(args.output_dir + "specificity.csv", index=False, sep='\t')
-        print(f"基因在特定细胞类型中的特异性表达结果已保存至 {args.output_dir}")
+        # # 计算各基因在空间聚类中的表达纯度
+        # purity_scores = calculate_spatial_purity(adata, selected_genes)
+        # purity_scores.to_csv(args.output_dir + "purity_scores.csv", index=False, sep='\t')
+        # print(f"各基因在空间聚类中的表达纯度结果已保存至 {args.output_dir}")
+        #
+        # # 验证基因在特定细胞类型中的特异性表达
+        # specificity = tissue_type_specificity(adata, selected_genes)
+        # specificity.to_csv(args.output_dir + "specificity.csv", index=False, sep='\t')
+        # print(f"基因在特定细胞类型中的特异性表达结果已保存至 {args.output_dir}")
 
         plot_multiple_genes(
             mk_score_df, adata, selected_genes,
