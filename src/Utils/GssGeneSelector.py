@@ -71,6 +71,8 @@ class GssGeneSelector:
         self.adata = self.adata[common_samples].copy()
         self.spatial_coords = spatial_coords.loc[common_samples]
 
+        self.cells = self.adata.X.shape[0]
+
     def select_genes_by_expression(self) -> pd.Series:
         """基于表达量筛选基因"""
         # 计算每个基因的平均表达量
@@ -186,7 +188,7 @@ class GssGeneSelector:
             genes: 待分析的基因列表
         返回：包含原始指标和综合评分的DataFrame
         """
-        top_k = 0.05  # 前5%细胞的表达占比
+        top_k = 0.1  # 前10%细胞的表达占比
         results = []
 
         for gene in genes:
@@ -373,9 +375,11 @@ class GssGeneSelector:
                 weighted_prob * np.log2(weighted_prob + 1e-10)
             )
 
+            max_entropy = np.log2(self.cells) # 理论最大熵
+
             results.append({
                 'gene': gene,
-                'entropy': weighted_entropy
+                'entropy': weighted_entropy / max_entropy
             })
 
         return pd.DataFrame(results)
@@ -532,6 +536,9 @@ class GssGeneSelector:
 
         print(f"初步筛选出 {len(initial_genes)} 个基因")
 
+        # 定义每个步骤的最大基因数量（可根据需求调整）
+        max_genes = min(100, int(0.1 * len(initial_genes)))  # 设置单步骤最大基因数
+
         # ---------
         # 运行空间差异表达分析
         # spatial_results = self.calculate_spatial_gene_qval(initial_genes)
@@ -539,27 +546,40 @@ class GssGeneSelector:
         # high_spatialde_genes = spatial_results[spatial_results['qval'] < 0.05].index.tolist()
         # ---------
 
-        # 3.0 计算表达离散度和集中性指标
+        # 3.0 计算表达离散度和集中性指标（越高越好）
         concentration_results = self.calculate_expression_concentration(initial_genes)
-        high_concentration_genes = concentration_results[concentration_results['concentration_score'] > self.concentration_threshold]['gene'].tolist()
-        print(f"基于表达离散度和集中性，保留 {len(high_concentration_genes)} 个基因")
+        # 先按阈值筛选，再按分数降序取前N个
+        filtered_concentration = concentration_results[
+            concentration_results['concentration_score'] > self.concentration_threshold
+            ].sort_values('concentration_score', ascending=False)  # 降序排序
+        high_concentration_genes = filtered_concentration.head(max_genes)['gene'].tolist()
+        print(f"基于表达离散度和集中性，保留 {len(high_concentration_genes)} 个基因（最多{max_genes}个）")
 
-        # 3.1 计算GSS与表达量的相关性
+        # 3.1 计算GSS与表达量的相关性（越高越好）
         corr_results = self.calculate_gss_expression_correlation(initial_genes)
-        high_corr_genes = corr_results[corr_results['gss_expr_corr'] > self.corr_threshold]['gene'].tolist()
-        print(f"基于GSS-表达量相关性，保留 {len(high_corr_genes)} 个基因")
+        filtered_corr = corr_results[
+            corr_results['gss_expr_corr'] > self.corr_threshold
+            ].sort_values('gss_expr_corr', ascending=False)  # 降序排序
+        high_corr_genes = filtered_corr.head(max_genes)['gene'].tolist()
+        print(f"基于GSS-表达量相关性，保留 {len(high_corr_genes)} 个基因（最多{max_genes}个）")
 
-        # 3.2 计算GSS的信息熵
+        # 3.2 计算GSS的信息熵（越低越好）
         entropy_results = self.calculate_genes_entropy(initial_genes)
-        high_entropy_genes = entropy_results[entropy_results['entropy'] < self.entropy_threshold]['gene'].tolist()
-        print(f"基于GSS的信息熵，保留 {len(high_entropy_genes)} 个基因")
+        filtered_entropy = entropy_results[
+            entropy_results['entropy'] < self.entropy_threshold
+            ].sort_values('entropy', ascending=True)  # 升序排序（熵值越低越优）
+        high_entropy_genes = filtered_entropy.head(max_genes)['gene'].tolist()
+        print(f"基于GSS的信息熵，保留 {len(high_entropy_genes)} 个基因（最多{max_genes}个）")
 
-        # 3.3 计算空间自相关性
+        # 3.3 计算空间自相关性（越高越好）
         morans_i_results = self.calculate_morans_i(initial_genes)
-        high_spatial_genes = morans_i_results[morans_i_results['morans_i'] > self.morans_i_threshold]['gene'].tolist()
-        print(f"基于空间自相关性，保留 {len(high_spatial_genes)} 个基因")
+        filtered_morans = morans_i_results[
+            morans_i_results['morans_i'] > self.morans_i_threshold
+            ].sort_values('morans_i', ascending=False)  # 降序排序
+        high_spatial_genes = filtered_morans.head(max_genes)['gene'].tolist()
+        print(f"基于空间自相关性，保留 {len(high_spatial_genes)} 个基因（最多{max_genes}个）")
 
-        # 3.4 计算空间重复性（如果有多个样本）
+        # 3.4 计算空间重复性（若有多个样本）
         if 'sample' in self.adata.obs.columns and len(self.adata.obs['sample'].unique()) >= 2:
             reproducibility_results = self.calculate_spatial_reproducibility(initial_genes)
             reliable_genes = reproducibility_results[reproducibility_results['icc'] > self.icc_threshold][

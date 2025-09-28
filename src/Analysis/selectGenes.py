@@ -1,72 +1,18 @@
+
 import os
+import json
+import scipy
 import argparse
+import numpy as np
 import pandas as pd
 import scanpy as sc
 import matplotlib.pyplot as plt
-import numpy as np
-import seaborn as sns
-import scipy
 from src.Utils.GssGeneSelector import GssGeneSelector
 from src.Utils.DataProcess import get_self_data_dir, get_hest_data_dir, set_chinese_font, read_data
 
 
-def select_gene_traditional(mk_score_df, adata, output_dir=None,
-                            select_n=30, expr_weight=0.8):
-    """
-    基于GSS值和表达量选择 n 个基因
 
-    参数:
-    - mk_score_df: 标记分数DataFrame (GSS值)
-    - adata: AnnData对象
-    - select_n: 选择的基因数量
-    - expr_weight: 表达量在综合评分中的权重(0-1)
-
-    返回:
-    - top_genes: 选择的基因名称列表
-    - gene_scores: 选择的基因及其分数的DataFrame
-    """
-
-    # 计算每个基因非零值的平均GSS分数
-    mean_gss = (mk_score_df.replace(0, pd.NA).mean(axis=1, skipna=True))
-
-    # 计算每个基因的平均表达量
-    if scipy.sparse.issparse(adata.X):
-        mean_expr = np.array(adata.X.mean(axis=0)).flatten()
-    else:
-        mean_expr = np.mean(adata.X, axis=0)
-
-    # 转换为Series，索引为基因名
-    mean_expr = pd.Series(mean_expr, index=adata.var_names)
-
-    # 标准化GSS值和表达量
-    gss_norm = (mean_gss - mean_gss.min()) / (mean_gss.max() - mean_gss.min())
-    expr_norm = (mean_expr - mean_expr.min()) / (mean_expr.max() - mean_expr.min())
-
-    # 计算加权综合评分
-    scores = gss_norm * expr_weight + expr_norm * (1 - expr_weight)
-    score_name = '综合评分'
-
-    # 获取分数最高的前n个基因
-    top_genes_idx = scores.argsort()[::-1][:select_n]
-    top_genes = scores.index[top_genes_idx]
-
-    # 创建包含基因及其分数的DataFrame
-    gene_scores = pd.DataFrame({
-        '基因名称': top_genes,
-        score_name: scores[top_genes].values,
-        'GSS值': mean_gss[top_genes].values,
-        '表达量': mean_expr[top_genes].values
-    })
-
-    if output_dir:
-        os.makedirs(output_dir, exist_ok=True)
-    gene_scores.to_csv(output_dir + "selected_genes.csv", index=False)
-    print(f"验证结果已保存至 {output_dir}")
-
-    return top_genes, gene_scores
-
-
-def select_gene_statistic(mk_score_df, adata, output_dir=None,
+def select_gene_func(mk_score_df, adata, output_dir=None,
                           min_expr_threshold=0.1, min_gss_threshold=0.5,
                           concentration_threshold = 90, corr_threshold=0.4,
                           entropy_threshold=0.2, morans_i_threshold=0.3):
@@ -97,96 +43,6 @@ def select_gene_statistic(mk_score_df, adata, output_dir=None,
     #     sc.pl.spatial(adata, color=gene, title=gene, save=f"{gene}_calibrated.png")
 
     return selected_genes, selected_results
-
-
-def plot_expression_heatmap(mk_score_df, adata, select_n=50, method='gss_expr', expr_weight=0.5,
-                            downsample_ratio=0.1, output_dir=None, show=True):
-    """
-    绘制根据不同准则选择的top n个基因的热图
-
-    参数:
-    - mk_score_df: 标记分数DataFrame
-    - adata: AnnData对象
-    - select_n: 选择的基因数量
-    - method: 基因选择方法，可选值: 'gss', 'expr', 'gss_expr'
-    - expr_weight: 表达量在综合评分中的权重(0-1)
-    - downsample_ratio: 细胞降采样比例
-    - output_dir: 图像保存目录
-    - show: 是否显示图像
-    """
-    # 对细胞进行降采样
-    n_cells = adata.shape[0]
-    n_downsample = int(n_cells * downsample_ratio)
-    downsample_idx = np.random.choice(n_cells, n_downsample, replace=False)
-    adata_downsampled = adata[downsample_idx, :].copy()
-
-    # 选择top n个基因
-    top_genes, gene_scores = select_gene_traditional(
-        mk_score_df, adata_downsampled,
-        select_n=select_n,
-        method=method,
-        expr_weight=expr_weight
-    )
-
-    # 打印筛选出的基因
-    method_names = {
-        'gss': 'GSS值最高',
-        'expr': '表达量最高',
-        'gss_expr': 'GSS值和表达量综合评分最高'
-    }
-    # print(f"筛选出的{method_names[method]}的基因:")
-    # print(gene_scores.to_string(index=False))
-
-    # 创建表达矩阵
-
-    expr_matrix = pd.DataFrame(
-        index=adata_downsampled.obs_names,
-        columns=top_genes
-    )
-
-    for gene in top_genes:
-        expr_matrix[gene] = adata_downsampled[:, gene].X.toarray().flatten() if scipy.sparse.issparse(
-            adata_downsampled.X) else adata_downsampled[:, gene].X.flatten()
-
-    # 创建图形
-    plt.figure(figsize=(12, 10))
-
-    # 绘制热图
-    sns.heatmap(
-        expr_matrix,
-        cmap='viridis',
-        square=True,
-        xticklabels=True,
-        yticklabels=False,
-        cbar_kws={'label': '表达量'},
-        linewidths=0.5,  # 增加边框宽度
-        annot_kws={"size": 6}  # 调整注释字体大小
-    )
-
-    # 设置标题
-    plt.title(f'{method_names[method]}的前 {select_n} 个基因的热图')
-
-    # 调整布局
-    plt.tight_layout()
-
-    # 保存图像（如果指定了输出目录）
-    if output_dir:
-        os.makedirs(output_dir, exist_ok=True)
-        output_path = os.path.join(output_dir, f'top_{select_n}_genes_heatmap_{method}.png')
-        plt.savefig(output_path, dpi=300, bbox_inches='tight')
-        print(f"热图已保存至: {output_path}")
-
-        # 保存筛选出的基因
-        gene_scores_path = os.path.join(output_dir, f'top_{select_n}_genes_{method}.csv')
-        gene_scores.to_csv(gene_scores_path, index=False)
-        print(f"筛选出的基因已保存至: {gene_scores_path}")
-
-    # 显示图像
-    if show:
-        plt.show()
-
-    # 关闭图形
-    plt.close()
 
 
 def calculate_spatial_purity(adata, genes, cluster_key='annotation_type'):
@@ -382,150 +238,118 @@ def plot_multiple_genes(mk_score_df, adata, gene_names,
     print(f"已完成 {len(gene_names)} 个基因的可视化")
 
 
-def main():
+def analyze_single_sample(output_dir, feather_path, h5ad_path):
+    """处理单个样本：基因筛选、可视化、评估"""
+    # 确保输出目录存在
+    os.makedirs(output_dir, exist_ok=True)
 
-    #分析方式
+    # 1. 读取数据
+    mk_score_df, adata = read_data(feather_path, h5ad_path)
+
+    # 2. 基因筛选
+    selected_genes, _ = select_gene_func(
+        mk_score_df, adata,
+        output_dir=output_dir,
+        min_expr_threshold=0.001,
+        min_gss_threshold=0.1,
+        concentration_threshold=70,  # 表达离散度和集中性阈值 [0, 100]
+        corr_threshold=0.6,  # GSS-表达量相关性阈值 [0, 1]
+        entropy_threshold=0.6,  # GSS的标准化信息熵阈值 [0, 1]
+        morans_i_threshold=0.6,  # 空间自相关性阈值 [0, 1]
+    )
+    print(selected_genes)
+
+    # 3. 可视化空间分布
+    plot_multiple_genes(
+        mk_score_df, adata, selected_genes,
+        output_dir=output_dir,
+        visual_indicators="Expr",  # ["GSS", "Expr"]
+        cmap='viridis',
+        size=1.0,
+        alpha=0.6
+    )
+
+    # 4. 评估：空间纯度、组织特异性等
+    # # 各基因在空间聚类中的表达纯度
+    # purity_scores = calculate_spatial_purity(adata, selected_genes)
+    # purity_scores.to_csv(output_dir + "purity_scores.csv", index=False, sep='\t')
+    # print(f"各基因在空间聚类中的表达纯度结果已保存!!!")
+    #
+    # # 基因在特定细胞类型中的特异性表达
+    # specificity = tissue_type_specificity(adata, selected_genes)
+    # specificity.to_csv(output_dir + "specificity.csv", index=False, sep='\t')
+    # print(f"基因在特定细胞类型中的特异性表达结果已保存!!!")
+
+
+def batch_analysis(select_n, json_path, data_dir, output_root):
+    """
+    批量分析JSON中所有样本
+    :param select_n: 至多分析的样本数量
+    :param json_path: JSON文件路径（存储物种、癌症、样本映射）
+    :param data_dir: 数据存放路径
+    :param output_root: 所有结果的根输出目录
+    """
+    # 1. 读取JSON
+    with open(json_path, "r") as f:
+        data = json.load(f)
+
+    # 2. 遍历物种
+    n = 5 # 每种癌症选取的样本数
     method = 'selectGenes'
+    species = "Homo sapiens"
+    species_data = data.get(species, {})
+    cancer_types = species_data.get("cancer_types", {})
 
-    # Mus musculus
-    # LIHB:NCBI627, MEL:ZEN81, PRAD:NCBI793, SKCM:NCBI689
+    # 3. 遍历每个癌症类型
+    i = 1
+    for cancer_type, sample_ids in cancer_types.items():
+        # 4. 遍历该癌症类型下的每个样本
+        ids_to_query = sample_ids[: min(n, len(sample_ids))]
+        for id in ids_to_query:
+            # 构建文件路径
+            if i <= select_n:
+                output_dir = os.path.join(output_root, species, cancer_type, id, method)
+                feather_path = os.path.join(data_dir, species, cancer_type, id,
+                                            f"latent_to_gene/{id}_gene_marker_score.feather")
+                h5ad_path = os.path.join(data_dir, species, cancer_type, id,
+                                         f"find_latent_representations/{id}_add_latent.h5ad")
 
-    # Homo sapiens
-    # ACYC:NCBI771, ALL:TENX134, BLCA:NCBI855, CESC:TENX50, COAD:TENX156,
-    # COADREAD:TENX139, CSCC:NCBI770, EPM:NCBI641, GBM:TENX138, HCC:TENX120,
-    # HGSOC:TENX142, IDC:TENX99, ILC :TENX96, LNET:TENX72, LUAD:TENX141
+                # 5. 调用单样本分析函数
+                print(f"------------开始分析：物种={species}, 癌症类型={cancer_type}, 样本={id}------------")
+                analyze_single_sample(output_dir, feather_path, h5ad_path)
+                print(f"完成分析：{output_dir}")
+            else:
+                if i > select_n:
+                    break
 
-    # 本地数据地址
-    work_dir = '/Users/wuyang/Documents/MyPaper/3/gsVis'
-    sample_id = 'BRCA'
-    sample_name = 'Human_Breast_Cancer'
-
-    # HEST数据地址
-    dataset = 'HEST'
-    species = 'Homo sapiens'  # 'Mus musculus'
-    cancer = 'ACYC'  # 'LIHB'
-    id = 'NCBI771'  # 'NCBI627'
-
-    # feather_path, h5ad_path, output_dir = (
-    #     get_self_data_dir(method, work_dir, sample_name, sample_id))
-
-    feather_path, h5ad_path, output_dir = (
-        get_hest_data_dir(method, work_dir, dataset, species, cancer, id))
-
-    # 创建命令行参数解析器
-    parser = argparse.ArgumentParser(description='可视化基因在空间上的表达分布')
-    parser.add_argument('--feather-path', default=feather_path, help='标记分数feather文件路径')
-    parser.add_argument('--h5ad-path', default=h5ad_path, help='AnnData h5ad文件路径')
-    parser.add_argument('--output-dir', default=output_dir, help='图像保存目录')
-
-    parser.add_argument('--gene', help='要可视化的基因名称')
-    parser.add_argument('--genes-file', help='包含多个基因名称的文件路径，每行一个基因')
-    parser.add_argument('--select-n', type=int, default=10, help='可视化值得分析的n个基因')
-    parser.add_argument('--method', choices=['statistic', 'gss_expr'], default='statistic',
-                        help='基因选择方法: statistic=使用统计学方法筛选, gss_expr=基于GSS值和表达量的综合评分')
-    parser.add_argument('--expr-weight', type=float, default=0.1,
-                        help='表达量在综合评分中的权重(0-1)，仅在method=gss_expr时有效')
-    parser.add_argument('--downsample-ratio', type=float, default=0.1, help='细胞降采样比例')
-    parser.add_argument('--cmap', default='viridis', help='颜色映射方案 (默认: viridis)')
-    parser.add_argument('--size', type=float, default=1.0, help='点大小 (默认: 1.0)')
-    parser.add_argument('--alpha', type=float, default=0.6, help='透明度 (默认: 0.7)')
-
-    # 解析命令行参数
-    args = parser.parse_args()
-
-    # 设置中文字体
-    set_chinese_font()
-
-    # 读取数据
-    mk_score_df, adata = read_data(args.feather_path, args.h5ad_path)
-
-    # 检查是否提供了基因名称
-    if args.gene:
-        # 可视化单个基因
-        plot_gene_spatial(
-            mk_score_df, adata, args.gene,
-            output_dir=args.output_dir,
-            cmap=args.cmap,
-            size=args.size,
-            alpha=args.alpha
-        )
-    elif args.genes_file:
-        # 从文件读取多个基因
-        with open(args.genes_file, 'r') as f:
-            genes = [line.strip() for line in f if line.strip()]
-
-        if genes:
-            print(f"将可视化 {len(genes)} 个基因")
-            plot_multiple_genes(
-                mk_score_df, adata, genes,
-                output_dir=args.output_dir,
-                cmap=args.cmap,
-                size=args.size,
-                alpha=args.alpha
-            )
-        else:
-            print("错误: 基因文件为空")
-    elif args.select_n != 0:
-        # 可视化值得分析的n个基因
-        print(f"将使用{args.method}方法来可视化基因！！！")
-
-        # 绘制热图
-        # plot_expression_heatmap(
-        #     mk_score_df, adata,
-        #     select_n=args.select_n,
-        #     method=args.method,
-        #     expr_weight=args.expr_weight,
-        #     downsample_ratio=args.downsample_ratio,
-        #     output_dir=args.output_dir
-        # )
-
-        if args.method == "statistic":
-            # 通过统计学方式可视化基因
-            selected_genes, _ = select_gene_statistic(
-                mk_score_df, adata,
-                output_dir=args.output_dir,
-                min_expr_threshold=0.01,
-                min_gss_threshold=0.1,
-                concentration_threshold=90, # 表达离散度和集中性阈值
-                corr_threshold=0.6, # GSS-表达量相关性阈值
-                entropy_threshold=8.5, # GSS的信息熵阈值
-                morans_i_threshold=0.5, # 空间自相关性阈值
-            )
-        elif args.method == "gss_expr":
-            # 基于GSS值和表达量可视化基因
-            selected_genes, _ = select_gene_traditional(
-                mk_score_df, adata,
-                output_dir=args.output_dir,
-                select_n=args.select_n,
-                expr_weight=args.expr_weight
-            )
-        else:
-            raise ValueError(f"不支持的选择方法: {args.method}")
-
-        print(selected_genes)
-
-        # # 计算各基因在空间聚类中的表达纯度
-        # purity_scores = calculate_spatial_purity(adata, selected_genes)
-        # purity_scores.to_csv(args.output_dir + "purity_scores.csv", index=False, sep='\t')
-        # print(f"各基因在空间聚类中的表达纯度结果已保存至 {args.output_dir}")
-        #
-        # # 验证基因在特定细胞类型中的特异性表达
-        # specificity = tissue_type_specificity(adata, selected_genes)
-        # specificity.to_csv(args.output_dir + "specificity.csv", index=False, sep='\t')
-        # print(f"基因在特定细胞类型中的特异性表达结果已保存至 {args.output_dir}")
-
-        plot_multiple_genes(
-            mk_score_df, adata, selected_genes,
-            output_dir=args.output_dir,
-            visual_indicators = "GSS", # ["GSS", "Expr"]
-            cmap=args.cmap,
-            size=args.size,
-            alpha=args.alpha
-        )
-    else:
-        print("错误: 请提供--gene、--genes-file或--select-n参数等")
-        parser.print_help()
+            i += 1
 
 
 if __name__ == "__main__":
-    main()
+
+    parser = argparse.ArgumentParser(description="统计学方式进行批量分析")
+    parser.add_argument("--select-n", type=str,
+                        default=29,
+                        help="至多分析样本")
+    parser.add_argument("--json", type=str,
+                        default="/Users/wuyang/Documents/MyPaper/3/dataset/cancer_samples.json",
+                        help="样本映射JSON路径")
+    parser.add_argument("--data-dir", type=str,
+                        default="/Users/wuyang/Documents/MyPaper/3/dataset/HEST-data/",
+                        help="数据根目录")
+    parser.add_argument("--output-root", type=str,
+                        default="/Users/wuyang/Documents/MyPaper/3/gsVis/output/HEST",
+                        help="结果输出根目录")
+
+    # 解析命令行参数
+    args = parser.parse_args()
+    # 设置中文字体
+    set_chinese_font()
+
+    # 进行批量分析
+    batch_analysis(
+        select_n = args.select_n,
+        json_path = args.json,
+        data_dir = args.data_dir,
+        output_root = args.output_root
+    )

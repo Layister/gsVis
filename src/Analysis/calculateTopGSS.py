@@ -1,11 +1,11 @@
 
 import os
+import json
 import argparse
 import numpy as np
 import pandas as pd
 import scanpy as sc
 import matplotlib.pyplot as plt
-from scipy.stats import skew, kurtosis
 from scipy.stats import gaussian_kde
 from scipy.signal import find_peaks
 from src.Utils.DataProcess import get_self_data_dir, get_hest_data_dir, set_chinese_font, read_data
@@ -38,10 +38,10 @@ def get_high_specificity_genes_kde_single_cell(gss_values, min_peak_height=0.05)
     main_peak_idx = peaks[np.argmax(peak_info['peak_heights'])]
     main_peak_gss = x[main_peak_idx]
 
-    # 找到峰值右侧密度下降到峰值1%的位置作为阈值（动态比例）
+    # 找到峰值右侧密度下降到峰值2%的位置作为阈值（动态比例）
     right_of_peak = x[x >= main_peak_gss]  # 仅看峰值右侧
     right_density = y_norm[x >= main_peak_gss]
-    threshold_idx = np.argmax(right_density <= 0.01 * peak_info['peak_heights'].max())
+    threshold_idx = np.argmax(right_density <= 0.02 * peak_info['peak_heights'].max())
 
     if threshold_idx == 0:  # 未找到下降点时，用峰值作为阈值
         threshold = main_peak_gss
@@ -52,7 +52,7 @@ def get_high_specificity_genes_kde_single_cell(gss_values, min_peak_height=0.05)
     return non_zero_gss[non_zero_gss >= threshold].index.tolist()
 
 
-def get_high_specificity_genes_nd_single_cell(gss_values, multiplier=9, use_median=False):
+def get_high_specificity_genes_nd_single_cell(gss_values, multiplier=3, use_median=False):
     """
     单个细胞的均值+标准差（或中位数+四分位距）筛选法
     逻辑：取显著高于整体水平的基因（适应偏态分布）
@@ -78,8 +78,8 @@ def get_high_specificity_genes_nd_single_cell(gss_values, multiplier=9, use_medi
         std = np.std(non_zero_gss.values)
         threshold = mean + multiplier * std
 
-    # 确保阈值不低于最大GSS值的1%（避免阈值过高导致无结果）
-    threshold = max(threshold, non_zero_gss.max() * 0.01)
+    # 确保阈值不低于最大GSS值的10%（避免阈值过高导致无结果）
+    threshold = max(threshold, non_zero_gss.max() * 0.1)
     return non_zero_gss[non_zero_gss >= threshold].index.tolist()
 
 
@@ -118,7 +118,7 @@ def get_distribution_features(gss_values, min_peak_height=0.05, visualize=True):
     返回：
     - features: 分布特征字典
     """
-    non_zero_gss = gss_values[gss_values > 0].values
+    non_zero_gss = gss_values[gss_values > 0].values.astype(np.float64)
     n_non_zero = len(non_zero_gss)
 
     # 1. 基础统计特征计算
@@ -131,27 +131,55 @@ def get_distribution_features(gss_values, min_peak_height=0.05, visualize=True):
             "has_high_tail": False,  # 是否有高值尾部（前0.5%高值/中位值 > 1.3）
             "mean": 0,
             "median": 0,
-            "top10p": 0
+            "top5p": 0
         }
     else:
         mean_gss = np.mean(non_zero_gss)
         median_gss = np.median(non_zero_gss)
         top5p_gss = np.percentile(non_zero_gss, 99.5)  # 前0.5%高值阈值
 
+        # 检查数据是否几乎恒定
+        data_range = np.max(non_zero_gss) - np.min(non_zero_gss)
+        if data_range < 1e-8:  # 使用范围而不是方差作为判断条件
+            skew_val = 0.0
+            kurt_val = 0.0
+        else:
+            # 使用更稳健的偏度和峰度计算方法
+            try:
+                # 使用基于分位数的偏度和峰度估计（Bowley偏度和Moors峰度）
+                q75, q25 = np.percentile(non_zero_gss, [75, 25])
+                q90, q10 = np.percentile(non_zero_gss, [90, 10])
+                q87_5, q62_5, q37_5, q12_5 = np.percentile(non_zero_gss, [87.5, 62.5, 37.5, 12.5])
+
+                # Bowley偏度
+                if (q75 - q25) > 1e-10:
+                    skew_val = (q75 + q25 - 2 * median_gss) / (q75 - q25)
+                else:
+                    skew_val = 0.0
+
+                # Moors峰度
+                if (q75 - q25) > 1e-10:
+                    kurt_val = (q87_5 - q62_5 - q37_5 + q12_5) / (q75 - q25)
+                else:
+                    kurt_val = 0.0
+            except:
+                skew_val = 0.0
+                kurt_val = 0.0
+
         features = {
             "n_non_zero": n_non_zero,
-            "skewness": skew(non_zero_gss),
-            "kurtosis": kurtosis(non_zero_gss),
+            "skewness": skew_val,
+            "kurtosis": kurt_val,
             "mean": mean_gss,
             "median": median_gss,
             "top5p": top5p_gss,
-            "has_high_tail": (top5p_gss / median_gss) > 1.3  # 高值尾部判断
+            "has_high_tail": (top5p_gss / median_gss) > 1.3 if median_gss > 0 else False
         }
 
         # 2. KDE峰值检测（仅当非零值足够多时）
         if n_non_zero >= 100:  # 数据量太少时不检测峰值（避免噪声）
             kde = gaussian_kde(non_zero_gss)
-            x = np.linspace(non_zero_gss.min(), non_zero_gss.max(), 1000)
+            x = np.linspace(non_zero_gss.min(), non_zero_gss.max(), 1000, dtype=np.float64)
             y = kde(x)
             y_norm = y / y.max()  # 归一化到0-1（方便统一峰值高度阈值）
             peaks, peak_info = find_peaks(y_norm, height=min_peak_height)
@@ -167,7 +195,6 @@ def get_distribution_features(gss_values, min_peak_height=0.05, visualize=True):
 
     # 3. 可视化分布（若开启）
     if visualize:
-
         # 绘制子图：1行2列（直方图+KDE曲线 + 统计指标标注）
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
 
@@ -227,25 +254,26 @@ def select_best_method(features):
     """
     # 规则1：非零值太少 → 直接用Top-N（最稳健）
     if features["n_non_zero"] < 100:
-        return "top_n", {"top_n": 5}  # 非零值少，只取前n
+        return "topn", {"top_n": min(10, features["n_non_zero"])}  # 非零值少，只取前n
 
     # 规则2：有明显多峰（≥2个峰值）→ KDE法（适合区分多簇分布）
-    if features["n_peaks"] >= 2:
+    elif features["n_peaks"] >= 2:
         return "kde", {}  # KDE法默认参数
 
     # 规则3：高度偏态（偏度>2）且有高值尾部 → Top-N法（适合长尾分布）
-    if features["skewness"] > 2 and features["has_high_tail"]:
+    elif features["skewness"] > 2 and features["has_high_tail"]:
         # 偏度越大，取的N越小（避免纳入太多低质量基因）
-        topn = 5 if features["skewness"] < 4 else 3
+        topn = 20 if features["skewness"] < 4 else 10
         return "topn", {"top_n": topn}
 
-    # 规则4：近似正态分布（偏度<1.5）→ 均值+标准差法（适合对称分布）
-    if abs(features["skewness"]) < 1.5:
+    # 规则4：近似正态分布（偏度<1.0）→ 均值+标准差法（适合对称分布）
+    elif abs(features["skewness"]) < 1.0:
         # 峰度越高（峰值越尖），倍数"multiplier"越低（避免漏筛）
         return "std", {"use_median":False}
 
     # 规则5：其他情况（如单峰、中等偏态）→ 中位数+四分位距法（抗极端值，适合中等偏态）
-    return "iqr", {"use_median":True}
+    else:
+        return "iqr", {"use_median":True}
 
 
 def dynamic_select_high_specific_genes(mk_score_df, adata):
@@ -261,7 +289,7 @@ def dynamic_select_high_specific_genes(mk_score_df, adata):
 
         # 2. 根据特征选择最佳方法
         method_name, params = select_best_method(features)
-        #print(method_name)
+        # print(method_name)
 
         # 3. 调用对应方法筛选基因
         if method_name == "kde":
@@ -280,6 +308,39 @@ def dynamic_select_high_specific_genes(mk_score_df, adata):
         # print(f"细胞 {cell} 选择方法: {method_name}, 特征: {features}")
 
     return high_specific_genes_per_cell
+
+
+def calculate_gene_func(adata, gene_counts,
+                        output_dir=None,
+                        spatial_top_pct=5,
+                        spatial_threshold=0.6,
+                        cluster_threshold=0.7
+                        ):
+    # 获取筛选的阈值
+    adaptive_threshold = calculate_adaptive_threshold(gene_counts=gene_counts,
+                                                      visualize=True,
+                                                      output_dir=output_dir)
+
+    filtered_genes_len = len([key for key, value in gene_counts.items() if value >= adaptive_threshold])
+    print(f"占据50%的度的频率阈值是{adaptive_threshold},有{filtered_genes_len}个基因通过筛选（仅供展示）！！！")
+
+    # 初始化选择器
+    selector = GssGeneCalculator(
+        adata=adata,
+        gene_counts=gene_counts,
+        spatial_top_pct=spatial_top_pct,  # 定义 “高表达细胞” 的百分比阈值
+        spatial_threshold=spatial_threshold,  # 判断 “空间范围受限” 的高表达占比阈值
+        cluster_threshold=cluster_threshold  # 判断 “聚集分布” 的聚集指数阈值
+    )
+
+    # 筛选具有特定空间表达模式的基因
+    selected_genes, results = selector.run_pipeline()
+
+    # 保存筛选结果
+    results.to_csv(output_dir + "_selected_genes.csv", index=False, sep='\t')
+    print(f"验证结果已保存至 {output_dir}")
+
+    return selected_genes, results
 
 
 def calculate_adaptive_threshold(gene_counts, visualize=True, output_dir=None):
@@ -338,9 +399,8 @@ def calculate_adaptive_threshold(gene_counts, visualize=True, output_dir=None):
         plt.savefig(f'{output_dir}gene_counts_distribution.png', dpi=300, bbox_inches='tight')
         print(f"分布图已保存至: {output_dir}gene_counts_distribution.png")
 
-        plt.show()
 
-    return max(10, threshold)  # 设置最小阈值，避免筛选过少基因
+    return threshold
 
 
 def plot_gene_spatial(mk_score_df, adata, gene_name, high_specificity_genes_per_cell,
@@ -459,106 +519,124 @@ def plot_multiple_genes(mk_score_df, adata, gene_names, high_specificity_genes_p
     print(f"已完成 {len(gene_names)} 个基因的可视化")
 
 
-def main():
-    # 分析方式
-    method = 'calculateTopGSS'
+def analyze_single_sample(output_dir, feather_path, h5ad_path):
+    """处理单个样本：计算Top GSS基因并保存结果"""
+    # 确保输出目录存在
+    os.makedirs(output_dir, exist_ok=True)
 
-    # Mus musculus
-    # LIHB:NCBI627, MEL:ZEN81, PRAD:NCBI793, SKCM:NCBI689
+    # 1. 读取GSS数据
+    mk_score_df, adata = read_data(feather_path, h5ad_path)
 
-    # Homo sapiens
-    # ACYC:NCBI771, ALL:TENX134, BLCA:NCBI855, CESC:TENX50, COAD:TENX156,
-    # COADREAD:TENX139, CSCC:NCBI770, EPM:NCBI641, GBM:TENX138, HCC:TENX120,
-    # HGSOC:TENX142, IDC:TENX99, ILC :TENX96, LNET:TENX72, LUAD:TENX141,
-    # LUSC:TENX62, PAAD:TENX140, PRAD:TENX157, PRCC:TENX105, READ:ZEN49,
-    # SCCRCC:INT24, SKCM:TENX158,
-
-    # 本地数据地址
-    work_dir = '/Users/wuyang/Documents/MyPaper/3/gsVis'
-    sample_id = 'BRCA'
-    sample_name = 'Human_Breast_Cancer'
-
-    # HEST数据地址
-    dataset = 'HEST'
-    species = 'Homo sapiens'  # 'Mus musculus'
-    cancer = 'ACYC'  # 'LIHB'
-    id = 'NCBI771'  # 'NCBI627'
-
-    # feather_path, h5ad_path, output_dir = (
-    #     get_self_data_dir(method, work_dir, sample_name, sample_id))
-
-    feather_path, h5ad_path, output_dir = (
-        get_hest_data_dir(method, work_dir, dataset, species, cancer, id))
-
-
-    # 创建命令行参数解析器
-    parser = argparse.ArgumentParser(description='可视化基因在特定spot上的表达分布')
-    parser.add_argument('--feather-path',default=feather_path, help='标记分数feather文件路径')
-    parser.add_argument('--h5ad-path', default=h5ad_path, help='AnnData h5ad文件路径')
-    parser.add_argument('--output-dir', default=output_dir, help='图像保存目录')
-
-    parser.add_argument('--top-n', type=int, default=10, help='每个细胞选择的高特异性基因数量')
-    parser.add_argument('--cmap', default='viridis', help='颜色映射方案 (默认: viridis)')
-    parser.add_argument('--size', type=float, default=1.0, help='点大小 (默认: 1.0)')
-    parser.add_argument('--alpha', type=float, default=0.6, help='透明度 (默认: 0.7)')
-    parser.add_argument('--min-count', type=int, default=100, help='基因在高特异性基因列表中出现的最小次数')
-
-    # 解析命令行参数
-    args = parser.parse_args()
-
-    # 设置中文字体
-    set_chinese_font()
-
-    # 读取数据
-    mk_score_df, adata = read_data(args.feather_path, args.h5ad_path)
-
+    # 2. 计算样本各个spot的高GSS基因
     high_specificity_genes_per_cell = dynamic_select_high_specific_genes(mk_score_df, adata)
+    gene_nums = {
+        cell_type: len(genes)
+        for cell_type, genes in high_specificity_genes_per_cell.items()
+    }
 
-    # 获取所有高特异性基因
+    # 3. 获取高特异性基因
     all_high_specificity_genes = set()
     for genes in high_specificity_genes_per_cell.values():
         all_high_specificity_genes.update(genes)
     all_high_specificity_genes = list(all_high_specificity_genes)
 
-    # 统计每个基因在高特异性基因列表中出现的次数
+    # 4. 统计各基因在列表中的频率
     gene_counts = {gene: 0 for gene in all_high_specificity_genes}
     for genes in high_specificity_genes_per_cell.values():
         for gene in genes:
             gene_counts[gene] += 1
 
-    # 获取筛选的阈值
-    adaptive_threshold = calculate_adaptive_threshold(gene_counts=gene_counts, visualize=True, output_dir=args.output_dir)
-    filtered_genes_len = len([key for key, value in gene_counts.items() if value >= adaptive_threshold])
-    print(f"占据50%的度的频率阈值是{adaptive_threshold},有{filtered_genes_len}个基因通过筛选（仅供展示）！！！")
-
-    # 初始化选择器
-    selector = GssGeneCalculator(
-        adata=adata,
-        gene_counts=gene_counts,
-        spatial_top_pct=5,
-        spatial_threshold=0.1,
-        cluster_threshold=0.8
+    # 5. 基因筛选
+    selected_genes, _ = calculate_gene_func(
+        adata, gene_counts,
+        output_dir=output_dir,
+        spatial_top_pct=5,  # 定义 “高表达细胞” 的百分比阈值
+        spatial_threshold=0.6,  # 判断 “离散度受限” 的离散阈值
+        cluster_threshold=0.6  # 判断 “聚集分布” 的聚集指数阈值
     )
+    print(selected_genes)
 
-    # 筛选具有特定空间表达模式的基因
-    selected_genes, results = selector.run_pipeline()
-
-    results.to_csv(args.output_dir + "_selected_genes.csv", index=False, sep='\t')
-    print(f"验证结果已保存至 {args.output_dir}")
-
-    # 可视化这些基因的空间表达模式
+    # 6. 可视化空间表达模式
     plot_multiple_genes(
         mk_score_df, adata, selected_genes,
         high_specificity_genes_per_cell,
-        output_dir=args.output_dir,
-        visual_indicators="GSS", # ["GSS", "Expr"]
-        cmap=args.cmap,
-        size=args.size,
-        alpha=args.alpha
+        output_dir=output_dir,
+        visual_indicators="Expr",  # ["GSS", "Expr"]
+        cmap='viridis',
+        size=1.0,
+        alpha=0.6
     )
 
-    print(selected_genes)
+
+def batch_analysis(select_n, json_path, data_dir, output_root):
+    """
+    批量分析JSON中所有样本的Top GSS基因
+    :param select_n: 至多分析的样本数量
+    :param json_path: 样本映射JSON路径
+    :param data_dir: 数据存放根目录
+    :param output_root: 结果输出根目录
+    """
+    # 1. 读取JSON
+    with open(json_path, "r") as f:
+        data = json.load(f)
+
+    # 2. 遍历物种
+    n = 5  # 每种癌症选取的样本数
+    method = 'calculateTopGSS'
+    species = "Homo sapiens"
+    species_data = data.get(species, {})
+    cancer_types = species_data.get("cancer_types", {})
+
+    # 3. 遍历每个癌症类型
+    i = 1
+    for cancer_type, sample_ids in cancer_types.items():
+        # 4. 遍历该癌症类型下的每个样本
+        ids_to_query = sample_ids[: min(n, len(sample_ids))]
+        for id in ids_to_query:
+            # 构建文件路径
+            if i <= select_n:
+                output_dir = os.path.join(output_root, species, cancer_type, id, method)
+                feather_path = os.path.join(data_dir, species, cancer_type, id,
+                                            f"latent_to_gene/{id}_gene_marker_score.feather")
+                h5ad_path = os.path.join(data_dir, species, cancer_type, id,
+                                         f"find_latent_representations/{id}_add_latent.h5ad")
+
+                # 5. 调用单样本分析函数
+                print(f"------------开始分析：物种={species}, 癌症类型={cancer_type}, 样本={id}------------")
+                analyze_single_sample(output_dir, feather_path, h5ad_path)
+                print(f"完成分析：{output_dir}")
+            else:
+                if i > select_n:
+                    break
+
+            i += 1
 
 
 if __name__ == "__main__":
-    main()
+    # 命令行参数
+    parser = argparse.ArgumentParser(description="批量计算样本的Top GSS基因")
+    parser.add_argument("--select-n", type=str,
+                        default=29,
+                        help="至多分析样本")
+    parser.add_argument("--json", type=str,
+                        default="/Users/wuyang/Documents/MyPaper/3/dataset/cancer_samples.json",
+                        help="样本映射JSON路径")
+    parser.add_argument("--data-dir", type=str,
+                        default="/Users/wuyang/Documents/MyPaper/3/dataset/HEST-data/",
+                        help="数据根目录")
+    parser.add_argument("--output-root", type=str,
+                        default="/Users/wuyang/Documents/MyPaper/3/gsVis/output/HEST",
+                        help="结果输出根目录")
+
+    # 解析命令行参数
+    args = parser.parse_args()
+    # 设置中文字体
+    set_chinese_font()
+
+    # 执行批量分析
+    batch_analysis(
+        select_n=args.select_n,
+        json_path=args.json,
+        data_dir=args.data_dir,
+        output_root=args.output_root
+    )
