@@ -5,7 +5,7 @@
       <excludeFolder url="file://$MODULE_DIR$/data" />
       <excludeFolder url="file://$MODULE_DIR$/output" />
     </content>
-    <orderEntry type="jdk" jdkName="py39tor113" jdkType="Python SDK" />
+    <orderEntry type="jdk" jdkName="gsVis" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
   </component>
 </module>

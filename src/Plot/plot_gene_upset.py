@@ -6,12 +6,8 @@ from collections import defaultdict
 import argparse
 import warnings
 
-
 # 忽略绘图警告
 warnings.filterwarnings("ignore", category=FutureWarning, module="upsetplot")
-
-# 设置中文字体支持
-plt.rcParams["font.family"] = ["Heiti TC", "Arial Unicode MS", "sans-serif"]
 plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
 
 
@@ -48,17 +44,28 @@ def get_common_genes(cancer_genes, cancer_types):
     return common_genes
 
 
-def plot_upset(cancer_genes, output_dir, min_size=1, max_sets=10, min_cancers=1):
-    """绘制Upset图并输出多种癌症的共有基因（至少 min_cancers 种）"""
+def plot_upset(cancer_genes, output_dir, min_size=1, selected_cancers=None, min_cancers=1):
+    """绘制Upset图并输出多种癌症的共有基因"""
     os.makedirs(output_dir, exist_ok=True)
 
-    # 限制显示的癌症类型数量
-    if len(cancer_genes) > max_sets:
-        sorted_cancers = sorted(cancer_genes.items(),
-                                key=lambda x: len(x[1]),
-                                reverse=True)
-        cancer_genes = dict(sorted_cancers[:max_sets])
-        print(f"癌症类型过多，仅显示基因数量最多的{max_sets}种")
+    # 如果指定了要分析的癌症类型，则只分析这些类型
+    if selected_cancers is not None and len(selected_cancers) > 0:
+        # 只保留数据中存在的癌症类型
+        available_cancers = [cancer for cancer in selected_cancers if cancer in cancer_genes]
+        missing_cancers = set(selected_cancers) - set(available_cancers)
+
+        if missing_cancers:
+            print(f"警告：以下癌症类型在数据中不存在: {', '.join(missing_cancers)}")
+
+        if not available_cancers:
+            print("错误：没有找到指定的癌症类型数据")
+            return
+
+        cancer_genes = {cancer: cancer_genes[cancer] for cancer in available_cancers}
+        print(f"分析指定的癌症类型: {', '.join(available_cancers)}")
+    else:
+        # 如果没有指定癌症类型，使用所有癌症类型
+        print(f"分析所有癌症类型: {', '.join(cancer_genes.keys())}")
 
     cancer_types = list(cancer_genes.keys())
     num_cancers = len(cancer_types)
@@ -122,7 +129,8 @@ def plot_upset(cancer_genes, output_dir, min_size=1, max_sets=10, min_cancers=1)
 
     if valid_combinations == 0:
         print(f"\n没有找到包含至少{min_cancers}种癌症的基因交集")
-        os.remove(gene_output_path)  # 删除空文件
+        if os.path.exists(gene_output_path):
+            os.remove(gene_output_path)  # 删除空文件
     else:
         print(f"\n包含至少{min_cancers}种癌症的共有基因已保存至: {gene_output_path}")
 
@@ -138,7 +146,7 @@ def plot_upset(cancer_genes, output_dir, min_size=1, max_sets=10, min_cancers=1)
         element_size=40,
     )
 
-    plt.title("不同癌症类型间的基因交集分布", fontsize=16)
+    plt.title("Distribution of Gene Overlap Among Different Cancer Types", fontsize=16)
 
     # 保存图片
     output_path = os.path.join(output_dir, "cancer_gene_upset.png")
@@ -149,30 +157,47 @@ def plot_upset(cancer_genes, output_dir, min_size=1, max_sets=10, min_cancers=1)
     return output_path
 
 
-def main():
+if __name__ == "__main__":
+
+    cancers = [
+        #'COAD',
+        'COADREAD',
+        #'EPM',
+        'GBM',
+        'HCC',
+        'HGSOC',
+        #'IDC',
+        'ILC',
+        'LUAD',
+        #'PAAD',
+        #'PRAD',
+        'READ',
+        #'SCCRCC',
+        'SKCM',
+    ]
+
+    # COADREAD_TENX70, IDC_NCBI684, IDC_NCBI681, PRAD_INT28, PRAD_INT27, READ_ZEN40, READ_ZEN36, SCCRCC_INT21, SCCRCC_INT20, SCCRCC_INT18, SCCRCC_INT17, SCCRCC_INT11, COAD_TENX156, COAD_TENX155, COAD_TENX154, COAD_TENX152, COAD_TENX149, COAD_TENX148, COAD_TENX147, COAD_MISC73, COAD_MISC67, COAD_MISC64, COAD_MISC57, COAD_MISC49, COAD_MISC48, COAD_MISC41, COAD_MISC39, COAD_MISC37, COAD_MISC36, COAD_MISC35, COAD_MISC34, COAD_MISC33, COAD_TENX128, COAD_TENX92, COAD_TENX91, COAD_TENX90, COAD_TENX89, COAD_TENX49, COAD_ZEN42
+
     parser = argparse.ArgumentParser(description='绘制Upset图并输出多种癌症的共有基因')
     parser.add_argument('--gene-freq',
-                        default='/Users/wuyang/Documents/MyPaper/3/gsVis/output/HEST/Homo sapiens/gene_frequency.csv',
+                        default='../output/HEST2/Homo sapiens/gene_frequency.csv',
                         help='gene_frequency.csv文件路径')
-    parser.add_argument('--output-dir', default='./upset_plots', help='输出目录')
-    parser.add_argument('--min-size', type=int, default=1, help='最小交集大小，默认1')
-    parser.add_argument('--max-sets', type=int, default=10, help='最多显示的癌症类型数量，默认8')
-    parser.add_argument('--min-cancers', type=int, default=2, help='最少癌症种类，默认1种')
+    parser.add_argument('--output-dir', default='./Plot/upset_plots', help='输出目录')
+    parser.add_argument('--min-size', type=int, default=2, help='最小交集大小，默认1')
+    parser.add_argument('--selected-cancers', default=cancers, help='指定要分析的癌症类型')
+    parser.add_argument('--min-cancers', type=int, default=2, help='最少癌症种类，默认2种')
 
     args = parser.parse_args()
 
     print("解析基因频率数据...")
     cancer_genes = parse_gene_frequency(args.gene_freq)
 
+    # 处理选定的癌症类型
     print("绘制Upset图并计算共有基因...")
     plot_upset(
         cancer_genes,
         args.output_dir,
         min_size=args.min_size,
-        max_sets=args.max_sets,
+        selected_cancers=args.selected_cancers,
         min_cancers=args.min_cancers
     )
-
-
-if __name__ == "__main__":
-    main()

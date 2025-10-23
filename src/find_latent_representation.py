@@ -1,9 +1,8 @@
 import logging
 import random
-
+import torch
 import numpy as np
 import scanpy as sc
-import torch
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import LabelEncoder
 from config import FindLatentRepresentationsConfig

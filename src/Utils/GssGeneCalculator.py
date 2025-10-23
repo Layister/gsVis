@@ -24,35 +24,6 @@ class GssGeneCalculator:
         self.spatial_threshold = spatial_threshold
         self.cluster_threshold = cluster_threshold
 
-    # def _get_spatial_expression_range(self, adata, gene_name, top_pct=5):
-    #     """
-    #     计算单个基因的高表达细胞占比
-    #     """
-    #     if gene_name not in adata.var_names:
-    #         raise ValueError(f"基因 {gene_name} 不在数据中")
-    #
-    #     # 提取基因表达值（处理稀疏矩阵）
-    #     gene_data = adata[:, gene_name].X
-    #     # 将稀疏矩阵转换为稠密数组并展平
-    #     if hasattr(gene_data, 'toarray'):  # 检查是否为稀疏矩阵
-    #         expr_values = gene_data.toarray().flatten()
-    #     else:
-    #         expr_values = gene_data.flatten()
-    #
-    #     n_total = len(expr_values)  # 总细胞数
-    #
-    #     # 确定高表达阈值
-    #     top_threshold = np.percentile(expr_values, 100 - top_pct)
-    #
-    #     # 筛选高表达细胞
-    #     high_expr_mask = expr_values >= top_threshold
-    #     n_high = np.sum(high_expr_mask)
-    #
-    #     # 计算高表达占比
-    #     ratio = n_high / n_total
-    #
-    #     return ratio
-
     def _get_expression_disparity(self, adata, gene_name):
         """
         计算基因表达的离散程度 - 更好的空间受限指标
@@ -152,9 +123,6 @@ class GssGeneCalculator:
         results = []
         for gene in candidate_genes:
             try:
-                # 计算高表达占比
-                # ratio = self._get_spatial_expression_range(adata, gene, top_pct)
-
                 # 计算高表达离散度
                 disparity = self._get_expression_disparity(adata, gene)
                 # 计算聚集指数

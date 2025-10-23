@@ -7,7 +7,6 @@ import argparse
 from collections import defaultdict
 
 # 设置中文字体支持
-plt.rcParams["font.family"] = ["Heiti TC", "Arial Unicode MS", "sans-serif"]
 plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
 
 
@@ -96,7 +95,7 @@ def plot_original_tissue(ax, adata, expr_x_min, expr_x_max, expr_y_min, expr_y_m
             scale_factor = spatial_data['scalefactors'].get(scale_key, 1.0)
 
             ax.imshow(img)
-            ax.set_title(f"组织切片 ({img_key})")
+            ax.set_title(f"tissue section ({img_key})")
             return True, scale_factor
 
     # 尝试其他图像格式
@@ -166,9 +165,9 @@ def visualize_single_sample(target_gene, cancer_type, sample_id, adata, output_d
 
             # 添加颜色条
             cbar = plt.colorbar(scatter, ax=ax2, orientation='vertical', shrink=0.8)
-            cbar.set_label('相对表达量')
+            cbar.set_label('Relative Expression')
 
-        ax2.set_title(f"{target_gene} 表达分布")
+        ax2.set_title(f"{target_gene} expression distribution")
         ax2.set_aspect('equal')
         ax2.axis('off')
 
@@ -178,7 +177,7 @@ def visualize_single_sample(target_gene, cancer_type, sample_id, adata, output_d
         ax2.axis('off')
 
     # 保存图像
-    fig.suptitle(f"{cancer_type} - 样本 {sample_id}", fontsize=14)
+    fig.suptitle(f"{cancer_type} - {sample_id}", fontsize=14)
     plt.tight_layout(rect=[0, 0, 1, 0.95])
     output_path = os.path.join(sample_output_dir, f"{cancer_type}_{sample_id}_{target_gene}.png")
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
@@ -211,18 +210,27 @@ def visualize_gene_spatial_expression(target_gene, gene_freq_path, sample_dir, o
     print(f"所有可用样本的可视化已完成，结果保存在: {os.path.join(output_dir, target_gene)}")
 
 
-def main():
+if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='可视化特定基因在多个癌症样本中的空间表达分布')
     parser.add_argument('--gene-freq',
-                        default='/Users/wuyang/Documents/MyPaper/3/gsVis/output/HEST/Homo sapiens/gene_frequency.csv',
+                        default='../output/HEST2/Homo sapiens/gene_frequency.csv',
                         help='gene_frequency.csv文件路径')
     parser.add_argument('--sample-dir',
-                        default='/Users/wuyang/Documents/MyPaper/3/dataset/HEST-data/Homo sapiens',
+                        default='/home/wuyang/hest-data/process/Homo sapiens',
                         help='存储样本h5ad文件的根目录')
-    parser.add_argument('--output-dir', default='./gene_spatial_plots', help='输出可视化结果的目录')
+    parser.add_argument('--output-dir', default='./Plot/gene_spatial_plots', help='输出可视化结果的目录')
 
     args = parser.parse_args()
-    vis_genes = ['COL1A1', 'COL3A1', 'DES', 'MZB1']
+
+    # 手动展示基因
+    vis_genes = ['DPT']
+    # 共现网络高频率基因
+    #vis_genes = ['IGLC2', 'IGHG3', 'IGKC', 'IGHA1', 'HBA2', 'IGLC3', 'HBB', 'IGHG2', 'HBA1']
+    # upset图高共有基因
+    #vis_genes = ['KRT17', 'LRRC15', 'MFAP5', 'MS4A1', 'SFRP2']
+    # 特定癌症独有基因
+    #        癌症['COAD',    'COADREAD', 'EPM',    'HCC',    'IDC',   'ILC', 'PAAD', 'PRAD', 'READ', 'SCCRCC', 'SKCM']
+    #vis_genes = ['IGKV1D-12', 'MCEMP1', 'CHI3L2', 'CYP2E1', 'KRT14', 'PIM1', 'GCG', 'TGM4', 'ITLN1', 'FABP7', 'MAL2']
 
     for gene in vis_genes:
         visualize_gene_spatial_expression(
@@ -231,7 +239,3 @@ def main():
             sample_dir=args.sample_dir,
             output_dir=args.output_dir
         )
-
-
-if __name__ == "__main__":
-    main()

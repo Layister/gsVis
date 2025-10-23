@@ -2,6 +2,8 @@ import warnings
 import pandas as pd
 import networkx as nx
 import matplotlib.pyplot as plt
+from scipy.spatial import ConvexHull
+import numpy as np
 import os
 import re
 from matplotlib.patches import Rectangle
@@ -9,16 +11,17 @@ from matplotlib.patches import Rectangle
 # 忽略绘图警告
 warnings.filterwarnings("ignore", category=FutureWarning, module="matplotlib")
 
-# 设置中文字体支持
-plt.rcParams["font.family"] = ["Heiti TC", "Arial Unicode MS", "sans-serif"]
-plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
+# 解决负号显示问题
+plt.rcParams['axes.unicode_minus'] = False
 
 
 def gene_cooccurrence_analysis(
         file_path,
-        cancer_colors,
+        vis_type = 'ConvexHull', #'ConvexHull', 'Rect'
+        max_visulize = 10,
+        cancer_colors=None,  # 改为可选参数
         save_image=True,
-        image_path="./gene_cooccurrence_plots/gene_networks.png",
+        image_path="./Plot/gene_cooccurrence_plots/gene_networks.png",
 ):
     # 创建输出目录
     output_dir = os.path.dirname(image_path)
@@ -36,9 +39,41 @@ def gene_cooccurrence_analysis(
 
         print(f"成功加载数据：{len(data_df)}条记录")
 
+        # 根据 cancer_colors 筛选要分析的癌症类型
+        if cancer_colors is not None and len(cancer_colors) > 0:
+            # 只分析 cancer_colors 中包含的癌症类型
+            data_df = data_df[data_df['cancer_type'].isin(cancer_colors.keys())]
+            print(f"根据 cancer_colors 筛选癌症类型：{list(cancer_colors.keys())}")
+        else:
+            # 如果没有提供 cancer_colors，为所有癌症类型生成明显不同的颜色
+            all_cancer_types = data_df['cancer_type'].unique()
+
+            # 使用更加鲜明且易于区分的颜色
+            distinct_colors = [
+                '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
+                '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf',
+                '#aec7e8', '#ffbb78', '#98df8a', '#ff9896', '#c5b0d5',
+                '#c49c94', '#f7b6d2', '#c7c7c7', '#dbdb8d', '#9edae5',
+                '#393b79', '#637939', '#8c6d31', '#843c39', '#7b4173',
+                '#5254a3', '#6b6ecf', '#9c9ede', '#3182bd', '#e6550d'
+            ]
+
+            cancer_colors = {}
+            for i, cancer_type in enumerate(all_cancer_types):
+                # 循环使用颜色列表，确保每种癌症都有明显不同的颜色
+                color_index = i % len(distinct_colors)
+                cancer_colors[cancer_type] = distinct_colors[color_index]
+
+            print(f"未提供 cancer_colors，分析所有癌症类型：{list(all_cancer_types)}")
+            print(f"为 {len(all_cancer_types)} 种癌症类型分配了明显不同的颜色")
+
         # 显示涉及的癌症类型
         cancer_types = data_df['cancer_type'].unique()
-        print(f"涉及的癌症类型：{', '.join(cancer_types[:5])}{'...' if len(cancer_types) > 5 else ''}")
+        if len(cancer_types) == 0:
+            print("错误：没有找到可分析的癌症类型数据")
+            return None, None
+
+        print(f"分析的癌症类型：{', '.join(cancer_types)}")
         print(f"共 {len(cancer_types)} 种癌症类型")
 
         # 为每种癌症提取Top10高频基因
@@ -108,8 +143,27 @@ def gene_cooccurrence_analysis(
         if G.number_of_nodes() > 0:
             print(f"平均连接度：{sum(dict(G.degree()).values()) / G.number_of_nodes():.2f}")
 
+        # 保存基因度信息
+        gene_degree_data = []
+        for gene in G.nodes:
+            degree = G.degree(gene)
+            cancers = ', '.join(G.nodes[gene]['cancers'])
+            frequency = G.nodes[gene]['frequency']
+            gene_degree_data.append({
+                'gene': gene,
+                'degree': degree,
+                'cancers': cancers,
+                'frequency': frequency
+            })
+
+        # 按度降序排序并保存
+        gene_degree_df = pd.DataFrame(gene_degree_data)
+        gene_degree_df = gene_degree_df.sort_values('degree', ascending=False)
+        degree_file = "./Plot/gene_cooccurrence_plots/gene_degree.csv"
+        gene_degree_df.to_csv(degree_file, index=False)
+
+
         # 筛选要显示的边：仅保留两个节点都是top 10基因的边
-        # 包括同一癌症内部和不同癌症之间的top 10基因
         edges_to_draw = []
         edge_weights = []
         for u, v, d in G.edges(data=True):
@@ -131,7 +185,7 @@ def gene_cooccurrence_analysis(
         edges_df = pd.DataFrame(edges_data, columns=['Gene1', 'Gene2', 'Common_Samples'])
         edges_df = edges_df.sort_values('Common_Samples', ascending=False)
 
-        edges_file = "./gene_cooccurrence_plots/gene_pairs.csv"
+        edges_file = "./Plot/gene_cooccurrence_plots/gene_pairs.csv"
         edges_df.to_csv(edges_file, index=False)
         print(f"\n基因对信息已保存至：{edges_file}")
         print(f"共保存了 {len(edges_df)} 对基因关系")
@@ -146,10 +200,11 @@ def gene_cooccurrence_analysis(
         ax = plt.gca()
 
         # 布局（基于全网络计算）
-        pos = nx.spring_layout(G, k=0.5, seed=42)
+        # pos = nx.spring_layout(G, k=0.5, seed=42)
+        pos = nx.spring_layout(G, k=0.3, seed=42, iterations=50)
 
         # 节点样式（大小由频率决定，颜色由连接度决定）
-        node_sizes = [G.nodes[gene]['frequency'] * 80 for gene in G.nodes]
+        node_sizes = [G.nodes[gene]['frequency'] * 10 for gene in G.nodes]
         node_colors = [G.degree(gene) for gene in G.nodes]
 
         # 绘制所有节点（包括非top 10基因）
@@ -177,17 +232,16 @@ def gene_cooccurrence_analysis(
         nx.draw_networkx_labels(
             G, pos,
             labels=labels,
-            font_size=8,
+            font_size=3,
             font_weight='bold',
             ax=ax
         )
 
-        # 癌症类型框选
-        all_cancers = set()
-        for gene in G.nodes:
-            all_cancers.update(G.nodes[gene]['cancers'])
+        # 癌症类型框选 - 只框选在 cancer_colors 中的癌症类型
+        for cancer in cancer_colors.keys():
+            if cancer not in cancer_types:  # 跳过数据中不存在的癌症类型
+                continue
 
-        for cancer in all_cancers:
             cancer_genes = [
                 gene for gene in G.nodes
                 if cancer in G.nodes[gene]['cancers']
@@ -196,38 +250,67 @@ def gene_cooccurrence_analysis(
             if not cancer_genes:
                 continue
 
-            positions = [pos[gene] for gene in cancer_genes]
-            min_x = min(p[0] for p in positions) - 0.1
-            max_x = max(p[0] for p in positions) + 0.1
-            min_y = min(p[1] for p in positions) - 0.1
-            max_y = max(p[1] for p in positions) + 0.1
-
             # 使用指定颜色
             color = cancer_colors.get(cancer, '#AAAAAA')
-            rect = Rectangle(
-                (min_x, min_y),
-                max_x - min_x,
-                max_y - min_y,
-                fill=False,
-                edgecolor=color,
-                linewidth=2,
-                linestyle='--',
-                label=cancer
-            )
-            ax.add_patch(rect)
+
+            #可选不同的方法框圈基因
+            if vis_type == 'ConvexHull': # 使用凸包框圈
+                positions = [pos[gene] for gene in cancer_genes]
+                if len(positions) >= 3:  # 凸包需要至少3个点
+                    points = np.array(positions)
+                    hull = ConvexHull(points)
+
+                    # 绘制凸包
+                    polygon = plt.Polygon(points[hull.vertices],
+                                          fill=False,
+                                          edgecolor=color,
+                                          linewidth=1,
+                                          linestyle='--',
+                                          label=cancer)
+                    ax.add_patch(polygon)
+                else:
+                    # 对于少于3个点的情况，使用小矩形
+                    min_x = min(p[0] for p in positions) - 0.03
+                    max_x = max(p[0] for p in positions) + 0.03
+                    min_y = min(p[1] for p in positions) - 0.03
+                    max_y = max(p[1] for p in positions) + 0.03
+
+                    rect = Rectangle(
+                        (min_x, min_y), max_x - min_x, max_y - min_y,
+                        fill=False, edgecolor=color, linewidth=1, linestyle='--', label=cancer
+                    )
+                    ax.add_patch(rect)
+            else: # 使用矩形框圈
+                positions = [pos[gene] for gene in cancer_genes]
+                min_x = min(p[0] for p in positions) - 0.1
+                max_x = max(p[0] for p in positions) + 0.1
+                min_y = min(p[1] for p in positions) - 0.1
+                max_y = max(p[1] for p in positions) + 0.1
+
+                rect = Rectangle(
+                    (min_x, min_y),
+                    max_x - min_x,
+                    max_y - min_y,
+                    fill=False,
+                    edgecolor=color,
+                    linewidth=1,
+                    linestyle='--',
+                    label=cancer
+                )
+                ax.add_patch(rect)
 
         # 颜色条和图例
         cbar = plt.colorbar(scatter, ax=ax)
-        cbar.set_label('基因连接度')
+        cbar.set_label('genetic connectivity')
 
         # 限制图例数量
         handles, labels = ax.get_legend_handles_labels()
-        if len(labels) > 10:
-            handles = handles[:10]
-            labels = labels[:10] + ['...']
-        plt.legend(handles, labels, title="癌症类型", loc='upper right', bbox_to_anchor=(1.25, 1))
+        if len(labels) > max_visulize:
+            handles = handles[:max_visulize]
+            labels = labels[:max_visulize] + ['...']
+        plt.legend(handles, labels, title="cancer type", loc='upper right', bbox_to_anchor=(1.25, 1))
 
-        plt.title('基因共现网络（仅显示Top10高频基因之间的边）', fontsize=14)
+        plt.title('Gene Co-occurrence Network (top 10 co-occurring genes)', fontsize=14)
         plt.axis('off')
 
         # 保存/显示
@@ -245,14 +328,32 @@ def gene_cooccurrence_analysis(
 
 
 if __name__ == "__main__":
-    file_path = "/Users/wuyang/Documents/MyPaper/3/gsVis/output/HEST/Homo sapiens/cancer_specific_genes.csv"
+    file_path = "../output/HEST2/Homo sapiens/cancer_specific_genes.csv"
+
+    """
+    '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
+    '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf',
+    '#aec7e8', '#ffbb78', '#98df8a', '#ff9896', '#c5b0d5',
+    '#c49c94', '#f7b6d2', '#c7c7c7', '#dbdb8d', '#9edae5',
+    '#393b79', '#637939', '#8c6d31', '#843c39', '#7b4173',
+    '#5254a3', '#6b6ecf', '#9c9ede', '#3182bd', '#e6550d'
+    """
 
     custom_colors = {
-        'GBM': '#FFA07A',
-        'COAD': '#FF6B6B',
-        'COADREAD': '#4ECDC4',
-        'CSCC': '#45B7D1',
-        'EPM': '#98D8C8'
+        #'COAD':'#393B79',
+        'COADREAD': '#843C39',
+        #'EPM': '#98D8C8',
+        'GBM': '#FF6B6B',
+        'HCC': '#AEC7E8',
+        'HGSOC':'#8C6D31',
+        #'IDC': '#4ECDC4',
+        'ILC': '#1F77B4',
+        'LUAD': '#E377C2',
+        #'PAAD': '#FFA07A',
+        #'PRAD': '#45B7D1',
+        'READ': '#FF7F0E',
+        #'SCCRCC': '#2CA02C',
+        'SKCM': '#E6550D',
     }
 
     gene_network, gene_pairs = gene_cooccurrence_analysis(
@@ -263,3 +364,4 @@ if __name__ == "__main__":
     if gene_pairs is not None and not gene_pairs.empty:
         print("\n前10对最常共现的基因：")
         print(gene_pairs.head(10))
+

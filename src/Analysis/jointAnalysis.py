@@ -3,7 +3,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from collections import Counter, defaultdict
 
-work_dir = '/Users/wuyang/Documents/MyPaper/3/gsVis/output/HEST/'
+work_dir = '../output/HEST2/'
 specie = 'Homo sapiens'
 
 res_dict = {}
@@ -31,7 +31,7 @@ for cancer in os.scandir(root_path):
                     df_select = pd.read_csv(select_file, sep='\t')
 
                     # 找出共同基因
-                    common_genes = set(df_calculate['gene'][df_calculate['is_cross']==True]).intersection(set(df_select['gene']))
+                    common_genes = set(df_calculate['gene'][df_calculate['selected']==True]).intersection(set(df_select['gene']))
                     res_dict[current_key] = common_genes
 
                     # 记录每个基因出现的键
@@ -57,14 +57,24 @@ for genes in res_dict.values():
     all_genes.extend(genes)  # 将每个样本的共同基因添加到总列表
 gene_counts = Counter(all_genes)  # 统计每个基因出现的次数
 
+
 # 筛选频率>1的基因，并整理信息
 gene_info = []
 for gene, keys in gene_keys.items():
     freq = len(keys)
     if freq > 1:  # 只保留频率大于1的基因
+
+        # 提取该基因出现的所有癌症类型
+        cancer_types = set()
+        for key in keys:
+            cancer_type = key.split('_')[0]  # 从"癌症类型_样本名称"中提取癌症类型
+            cancer_types.add(cancer_type)
+
         gene_info.append({
             'gene': gene,
             'frequency': freq,
+            'cancers': len(cancer_types),  # 出现的癌症类型数量
+            'cancer_types': ', '.join(sorted(cancer_types)),  # 具体的癌症类型列表
             'keys': ', '.join(keys)  # 将键列表用逗号连接成字符串
         })
 
@@ -101,6 +111,42 @@ if cancer_specific_genes:
     print(f"癌症特异基因信息已保存到文件!")
 else:
     print("未找到任何癌症特异基因")
+
+# ----------
+# 第三部分：只在某一个癌症中出现的基因（新增部分）
+# ----------
+
+cancer_unique_genes = []
+
+# 遍历所有基因
+for gene, keys in gene_keys.items():
+    # 提取该基因出现的所有癌症类型
+    cancer_types = set()
+    for key in keys:
+        cancer_type = key.split('_')[0]
+        cancer_types.add(cancer_type)
+
+    # 检查是否只在某一个癌症类型中出现
+    if len(cancer_types) == 1:
+        cancer_name = list(cancer_types)[0]
+        frequency = len(keys)
+
+        cancer_unique_genes.append({
+            'gene': gene,
+            'cancer_type': cancer_name,
+            'frequency': frequency,
+            'samples': ', '.join(keys)
+        })
+
+# 按频率降序排序并保存
+if cancer_unique_genes:
+    df_unique = (pd.DataFrame(cancer_unique_genes)
+                 .sort_values(by=['frequency'], ascending=False)
+                 .to_csv(root_path + '/cancer_unique_genes.csv', index=False, sep='\t'))
+    print(f"单一癌症特有基因信息已保存到文件!")
+    print(f"共找到 {len(cancer_unique_genes)} 个只在单一癌症中出现的基因")
+else:
+    print("未找到任何只在单一癌症中出现的基因")
 
 # ----------
 # 可视化部分

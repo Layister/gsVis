@@ -7,26 +7,17 @@ import numpy as np
 import pandas as pd
 import scanpy as sc
 import matplotlib.pyplot as plt
-from src.Utils.GssGeneSelector import GssGeneSelector
+from src.Utils.GssGeneSelector_parallel import GssGeneSelector
 from src.Utils.DataProcess import get_self_data_dir, get_hest_data_dir, set_chinese_font, read_data
 
 
 
-def select_gene_func(mk_score_df, adata, output_dir=None,
-                          min_expr_threshold=0.1, min_gss_threshold=0.5,
-                          concentration_threshold = 90, corr_threshold=0.4,
-                          entropy_threshold=0.2, morans_i_threshold=0.3):
+def select_gene_func(mk_score_df, adata, output_dir=None):
     # 初始化选择器
     selector = GssGeneSelector(
         adata=adata,  # AnnData对象
         gss_df=mk_score_df,  # GSS分数矩阵
         output_dir=output_dir,
-        min_expr_threshold=min_expr_threshold,
-        min_gss_threshold=min_gss_threshold,
-        concentration_threshold=concentration_threshold,
-        corr_threshold=corr_threshold,
-        entropy_threshold=entropy_threshold,
-        morans_i_threshold=morans_i_threshold,
     )
 
     # 运行全流程
@@ -34,13 +25,6 @@ def select_gene_func(mk_score_df, adata, output_dir=None,
 
     # 查看结果
     print(f"最终选择 {len(selected_genes)} 个基因")
-
-    # 可视化Top基因的空间表达
-    # if output_dir:
-    #     sc.settings.figdir = output_dir
-    #
-    # for gene in selected_genes[:-1]:
-    #     sc.pl.spatial(adata, color=gene, title=gene, save=f"{gene}_calibrated.png")
 
     return selected_genes, selected_results
 
@@ -194,7 +178,7 @@ def plot_gene_spatial(mk_score_df, adata, gene_name,
             # alpha=alpha,
             alpha_img=background_alpha,
             img_key='downscaled_fullres', # 'hires'
-            title=f'{gene_name}空间表达分布({visual_indicators})',
+            title=f'{gene_name}({visual_indicators})',
             return_fig = True,
             frameon=True,
             show=show,
@@ -249,13 +233,7 @@ def analyze_single_sample(output_dir, feather_path, h5ad_path):
     # 2. 基因筛选
     selected_genes, _ = select_gene_func(
         mk_score_df, adata,
-        output_dir=output_dir,
-        min_expr_threshold=0.001,
-        min_gss_threshold=0.1,
-        concentration_threshold=70,  # 表达离散度和集中性阈值 [0, 100]
-        corr_threshold=0.6,  # GSS-表达量相关性阈值 [0, 1]
-        entropy_threshold=0.6,  # GSS的标准化信息熵阈值 [0, 1]
-        morans_i_threshold=0.6,  # 空间自相关性阈值 [0, 1]
+        output_dir=output_dir
     )
     print(selected_genes)
 
@@ -297,6 +275,8 @@ def batch_analysis(select_n, json_path, data_dir, output_root):
     n = 5 # 每种癌症选取的样本数
     method = 'selectGenes'
     species = "Homo sapiens"
+    selected_cancers = ['COAD', 'COADREAD', 'EPM', 'GBM', 'HCC', 'HGSOC', 'IDC',
+                        'ILC', 'LUAD', 'PAAD', 'PRAD', 'READ', 'SCCRCC', 'SKCM']
     species_data = data.get(species, {})
     cancer_types = species_data.get("cancer_types", {})
 
@@ -304,10 +284,10 @@ def batch_analysis(select_n, json_path, data_dir, output_root):
     i = 1
     for cancer_type, sample_ids in cancer_types.items():
         # 4. 遍历该癌症类型下的每个样本
-        ids_to_query = sample_ids[: min(n, len(sample_ids))]
+        ids_to_query = sample_ids[:] # min(n, len(sample_ids))
         for id in ids_to_query:
             # 构建文件路径
-            if i <= select_n:
+            if i <= select_n and len(ids_to_query) > 1 and cancer_type in selected_cancers:
                 output_dir = os.path.join(output_root, species, cancer_type, id, method)
                 feather_path = os.path.join(data_dir, species, cancer_type, id,
                                             f"latent_to_gene/{id}_gene_marker_score.feather")
@@ -327,18 +307,19 @@ def batch_analysis(select_n, json_path, data_dir, output_root):
 
 if __name__ == "__main__":
 
+    # 命令行参数
     parser = argparse.ArgumentParser(description="统计学方式进行批量分析")
     parser.add_argument("--select-n", type=str,
-                        default=29,
+                        default=9999,
                         help="至多分析样本")
     parser.add_argument("--json", type=str,
-                        default="/Users/wuyang/Documents/MyPaper/3/dataset/cancer_samples.json",
+                        default="/home/wuyang/hest-data/cancer_samples.json",
                         help="样本映射JSON路径")
     parser.add_argument("--data-dir", type=str,
-                        default="/Users/wuyang/Documents/MyPaper/3/dataset/HEST-data/",
+                        default="/home/wuyang/hest-data/process/",
                         help="数据根目录")
     parser.add_argument("--output-root", type=str,
-                        default="/Users/wuyang/Documents/MyPaper/3/gsVis/output/HEST",
+                        default="../output/HEST",
                         help="结果输出根目录")
 
     # 解析命令行参数

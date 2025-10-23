@@ -2,16 +2,11 @@ import pandas as pd
 import numpy as np
 import scanpy as sc
 from scipy import stats
-import statsmodels.api as sm
-from sklearn.metrics import cohen_kappa_score
-from skimage import measure
 from typing import List, Tuple, Optional
 from scipy.spatial import distance
 import scipy
 import os
-import SpatialDE as sd
-import matplotlib.pyplot as plt
-import seaborn as sns
+
 
 
 class GssGeneSelector:
@@ -21,13 +16,10 @@ class GssGeneSelector:
                  adata: sc.AnnData,
                  gss_df: pd.DataFrame,
                  output_dir: str,
-                 min_expr_threshold: float = 0.1,
-                 min_gss_threshold: float = 0.5,
-                 concentration_threshold = 90,
-                 corr_threshold = 0.4,
-                 entropy_threshold: float = 0.2,
-                 morans_i_threshold: float = 0.3,
-                 icc_threshold: float = 0.7,
+                 concentration_threshold=80,
+                 corr_threshold=0.6,
+                 morans_i_threshold: float = 0.6,
+                 icc_threshold: float = 0.6,
                  ):
         """
         初始化基因选择器
@@ -36,22 +28,16 @@ class GssGeneSelector:
             adata: AnnData对象，包含基因表达矩阵和空间坐标
             gss_df: GSS分数DataFrame，行名为基因名，列名为样本名
             output_dir: 输出文件地址
-            min_expr_threshold: 最小表达量阈值
-            min_gss_threshold: GSS分数阈值
             concentration_threshold: 表达离散度和集中性阈值
             corr_threshold: 相关系数阈值
-            entropy_threshold：GSS信息熵阈值
             morans_i_threshold: Moran's I指数阈值
             icc_threshold: 组内相关系数阈值
         """
         self.adata = adata
         self.gss_df = gss_df
         self.output_dir = output_dir
-        self.min_expr_threshold = min_expr_threshold
-        self.min_gss_threshold = min_gss_threshold
         self.concentration_threshold = concentration_threshold
         self.corr_threshold = corr_threshold
-        self.entropy_threshold = entropy_threshold
         self.morans_i_threshold = morans_i_threshold
         self.icc_threshold = icc_threshold
 
@@ -70,95 +56,118 @@ class GssGeneSelector:
         common_samples = np.intersect1d(adata.obs_names, spatial_coords.index)
         self.adata = self.adata[common_samples].copy()
         self.spatial_coords = spatial_coords.loc[common_samples]
-
         self.cells = self.adata.X.shape[0]
 
-    def select_genes_by_expression(self) -> pd.Series:
-        """基于表达量筛选基因"""
-        # 计算每个基因的平均表达量
+        # 预处理表达矩阵为密集矩阵（如果是稀疏矩阵）
         if scipy.sparse.issparse(self.adata.X):
-            mean_expr = np.array(self.adata.X.mean(axis=0)).flatten()
+            self._expr_matrix = self.adata.X.toarray()
         else:
-            mean_expr = np.mean(self.adata.X, axis=0)
+            self._expr_matrix = self.adata.X.copy()
+        self._gene_names = self.adata.var_names.tolist()
+        self._gene_index = {gene: i for i, gene in enumerate(self._gene_names)}
 
-        # 归一化处理
-        mean_expr = (mean_expr - np.min(mean_expr)) / (np.max(mean_expr) - np.min(mean_expr))
-        gene_expr = pd.Series(mean_expr, index=self.adata.var_names)
+    def select_genes_by_expression(self) -> pd.Series:
+        """
+        基于表达量筛选基因：同时过滤低表达（覆盖率）和低变异（变异系数）的基因
+        """
+        expr_df = self._expr_matrix.T  # 转置为 (gene×spot) 以提高处理效率
+        n_genes, n_spots = expr_df.shape
 
-        # 筛选高于表达阈值的基因
-        high_expr_genes = gene_expr[gene_expr > self.min_expr_threshold]
-        return high_expr_genes
+        # 定义极低表达阈值（自身表达的10%分位数）、覆盖率阈值、变异系数阈值
+        low_expr_percentile = 10  # 用于计算自身极低表达阈值的分位数
+        expr_threshold = 0.1  # 最小覆盖率阈值
+        cv_threshold = 0.5  # 变异系数阈值
+
+        # 1. 计算每个基因的low_expr_percentile分位数（非零值）
+        non_zero_mask = expr_df > 0
+        q_n = np.zeros(n_genes)
+        for i in range(n_genes):
+            non_zero_vals = expr_df[i, non_zero_mask[i]]
+            q_n[i] = np.percentile(non_zero_vals, low_expr_percentile) if non_zero_vals.size > 0 else 0
+
+        # 2. 计算表达覆盖率：表达量高于自身极低阈值的spot比例
+        coverage = (expr_df > q_n[:, np.newaxis]).mean(axis=1)
+
+        # 3. 计算变异系数（CV=标准差/均值）：衡量表达变异度
+        mean_expr = expr_df.mean(axis=1)
+        std_expr = expr_df.std(axis=1)
+        cv = np.divide(std_expr, mean_expr, out=np.zeros_like(std_expr), where=mean_expr > 1e-10)
+
+        # 4. 筛选基因
+        high_quality_mask = (coverage > expr_threshold) & (cv > cv_threshold)
+        high_quality_genes = np.array(self._gene_names)[high_quality_mask]
+
+        high_quality_genes = pd.Series(high_quality_genes)
+        print(f"表达筛选后保留基因数：{len(high_quality_genes)}")
+        return high_quality_genes
 
     def select_genes_by_gss(self) -> pd.Series:
-        """基于GSS分数筛选基因"""
-        # 计算每个基因非零值的平均GSS分数
-        mean_gss = (self.gss_df.replace(0, pd.NA).mean(axis=1, skipna=True))
+        """
+        基于GSS分数筛选基因：同时过滤 低均值 和 高零值占比 的基因
+        """
+        # 1. 计算每个基因非零值的平均GSS分数（含NaN，对应全零基因），并过滤有效（非NaN）的mean_gss
+        mean_gss = self.gss_df.replace(0, pd.NA).mean(axis=1, skipna=True)
+        valid_mean_gss = mean_gss.dropna()
 
-        # 归一化处理
-        mean_gss = (mean_gss - np.min(mean_gss)) / (np.max(mean_gss) - np.min(mean_gss))
+        # 2. 仅对有效基因计算排名，再映射回原索引（NaN基因保持NaN）
+        normalized_valid = pd.Series(stats.rankdata(valid_mean_gss) / len(mean_gss), index=valid_mean_gss.index)
+        normalized_gss = normalized_valid.reindex(mean_gss.index)
 
-        # 筛选高于GSS阈值的基因
-        high_gss_genes = mean_gss[mean_gss > self.min_gss_threshold]
+        # 3. 筛选条件
+        zero_cutoff = 0.95 # 允许零值比例小于 zero_cutoff
+        zero_ratio = (self.gss_df == 0).mean(axis=1)
+        low_gss_percentile = 10 # 要求均值大于 low_gss_percentile%
+        mean_cutoff = np.percentile(normalized_gss.dropna(), low_gss_percentile)
+
+        # 4. 同时满足两个条件
+        mask = (normalized_gss > mean_cutoff) & (zero_ratio <= zero_cutoff)
+        high_gss_genes = normalized_gss[mask]
+
+        print(f"GSS筛选后保留基因数：{len(high_gss_genes)}")
         return high_gss_genes
 
     def calculate_spatial_reproducibility(self, genes: List[str]) -> pd.DataFrame:
         """
         计算基因空间表达的重复性（跨样本一致性）
-
-        参数:
-            genes: 待计算的基因列表
-
-        返回:
-            重复性结果DataFrame
         """
         if len(self.adata.obs['sample'].unique()) < 2:
             print("警告：数据中只有一个样本，无法计算空间重复性")
             return pd.DataFrame(columns=['gene', 'icc', 'spatial_purity'])
 
         results = []
+        samples = self.adata.obs['sample'].unique()
+        sample_masks = {s: self.adata.obs['sample'] == s for s in samples}
+        n_samples = len(samples)
 
-        for gene in genes:
-            # 获取基因在各样本中的表达矩阵
-            expr_by_sample = {}
-            for sample in self.adata.obs['sample'].unique():
-                sample_cells = self.adata.obs_names[self.adata.obs['sample'] == sample]
-                expr = self.adata[sample_cells, gene].X
-                if scipy.sparse.issparse(expr):
-                    expr = np.array(expr).flatten()
-                expr_by_sample[sample] = expr
+        # 批量获取基因索引
+        gene_indices = [self._gene_index[gene] for gene in genes]
+        expr_matrix = self._expr_matrix[:, gene_indices].T  # (基因×样本)
 
-            # 计算ICC（简化版，实际应使用专门的ICC计算函数）
-            # 这里用样本间表达相关性的平均值近似
-            corr_matrix = np.zeros((len(expr_by_sample), len(expr_by_sample)))
-            samples = list(expr_by_sample.keys())
+        for i, gene in enumerate(genes):
+            # 获取基因在各样本中的表达
+            expr_by_sample = []
+            for s in samples:
+                expr = expr_matrix[i, sample_masks[s]]
+                expr_by_sample.append(expr)
 
-            for i in range(len(samples)):
-                for j in range(i + 1, len(samples)):
-                    corr, _ = stats.pearsonr(expr_by_sample[samples[i]], expr_by_sample[samples[j]])
-                    corr_matrix[i, j] = corr
-                    corr_matrix[j, i] = corr
+            # 优化相关性计算
+            expr_array = np.array(expr_by_sample)
+            corr_matrix = np.corrcoef(expr_array)
+            icc = np.mean(corr_matrix[np.triu_indices(n_samples, k=1)])
 
-            # 计算平均相关性作为ICC近似
-            icc = np.mean(corr_matrix[corr_matrix > 0])
-
-            # 计算空间纯度（如果有空间聚类标签）
+            # 计算空间纯度
             if 'spatial_cluster' in self.adata.obs.columns:
-                cluster_labels = self.adata.obs['spatial_cluster']
-                expr = self.adata[:, gene].X
-                if scipy.sparse.issparse(expr):
-                    expr = expr.toarray().flatten()
+                cluster_labels = self.adata.obs['spatial_cluster'].values
+                expr = self._expr_matrix[:, self._gene_index[gene]]
 
-                # 计算每个聚类内的平均表达
-                cluster_expr = {}
-                for cluster in cluster_labels.unique():
-                    cluster_cells = cluster_labels == cluster
-                    cluster_expr[cluster] = np.mean(expr[cluster_cells])
+                # 向量化计算聚类平均表达
+                unique_clusters = np.unique(cluster_labels)
+                cluster_expr = np.array([
+                    np.mean(expr[cluster_labels == c])
+                    for c in unique_clusters
+                ])
 
-                # 找到表达最高的聚类
-                max_cluster = max(cluster_expr, key=cluster_expr.get)
-                max_expr = cluster_expr[max_cluster]
-
-                # 计算纯度（最高聚类表达占总表达的比例）
+                max_expr = cluster_expr.max()
                 total_expr = np.sum(expr)
                 purity = max_expr / total_expr if total_expr > 0 else 0
             else:
@@ -172,410 +181,236 @@ class GssGeneSelector:
 
         return pd.DataFrame(results)
 
-    def calculate_spatial_gene_qval(self, genes: List[str]) -> pd.DataFrame:
-        expr = self.adata[:, genes].to_df()
-        gss = self.gss_df.loc[genes].T
-        coords = self.spatial_coords.values
-        # 运行空间差异表达分析
-        results = sd.run(coords, expr)
-
-        return results
-
-    def calculate_expression_concentration(self, genes: list) -> pd.DataFrame:
+    def calculate_expression_concentration(self, genes: List[str], spatial_coords) -> pd.DataFrame:
         """
-        计算基因的表达集中性综合评分（融合离散指数和表达占比集中度）
-        参数：
-            genes: 待分析的基因列表
-        返回：包含原始指标和综合评分的DataFrame
+        计算基因的表达集中性综合评分
         """
-        top_k = 0.1  # 前10%细胞的表达占比
+        spatial_threshold = 0.15  # 空间分散度阈值（高表达样本分散在15%的空间范围内）
+        cum_expr_ratio = 0.50  # 累积表达量占比阈值（找贡献50%表达量的最小样本数）
         results = []
 
-        for gene in genes:
-            # 1. 提取基因表达量
-            if scipy.sparse.issparse(self.adata.X):
-                expr = self.adata[:, gene].X.A.flatten()
+        # 归一化空间坐标（向量化）
+        spatial_coords = spatial_coords.copy()
+        for dim in range(2):
+            dim_vals = spatial_coords[:, dim]
+            dim_min, dim_max = dim_vals.min(), dim_vals.max()
+            if dim_max - dim_min < 1e-10:
+                spatial_coords[:, dim] = 0.0
             else:
-                expr = self.adata[:, gene].X.flatten()
+                spatial_coords[:, dim] = (dim_vals - dim_min) / (dim_max - dim_min)
 
-            # 2. 计算表达离散指数（VMR）
+        # 批量获取基因表达
+        gene_indices = [self._gene_index[gene] for gene in genes]
+        expr_matrix = self._expr_matrix[:, gene_indices].T  # (gene×spot)
+        expr_matrix = np.log1p(expr_matrix)  # np.log1p(expr_matrix) 或 np.arcsinh(expr_matrix)
+
+        for i, gene in enumerate(genes):
+            expr = expr_matrix[i]
+
+            # 计算表达离散指数（VMR）
             mean_expr = np.mean(expr)
             var_expr = np.var(expr)
             if mean_expr < 1e-10:
-                disp_index = np.inf
+                disp_index = 0
             else:
                 disp_index = var_expr / mean_expr
 
-            # 3. 计算表达占比集中度
+            # 计算表达占比集中度（自适应样本比例）
             sorted_expr = np.sort(expr)[::-1]
-            top_n = max(1, int(len(expr) * top_k))
-            top_sum = np.sum(sorted_expr[:top_n])
             total_sum = np.sum(sorted_expr)
-            concentration_ratio = top_sum / total_sum if total_sum >= 1e-10 else 0.0
+
+            if total_sum < 1e-10:
+                concentration_ratio = 0.0
+                top_n = 0
+            else:
+                cumulative_sum = np.cumsum(sorted_expr) # 计算累积表达量
+                target = total_sum * cum_expr_ratio # 找到贡献cum_expr_ratio总表达量的最小样本数
+                top_n = np.argmax(cumulative_sum >= target) + 1 if cumulative_sum[-1] >= target else len(sorted_expr) # 找到第一个累积表达量≥目标值的索引（+1转为样本数）
+
+                # 设置top_n上下限约束（避免极端值）
+                cell_count = len(expr)
+                top_n = max(20, min(top_n, int(cell_count * 0.2), 500))
+                # 计算前top_n样本的表达占比（占比越高，集中性越强）
+                top_sum = np.sum(sorted_expr[:top_n])
+                concentration_ratio = top_sum / total_sum
+
+            # 空间聚集性约束（计算高表达样本的空间分散度）
+            spatial_pass = True
+            if top_n >= 10: # 至少10个样本才计算空间分布（避免极端值）
+                top_indices = np.argsort(expr)[-top_n:] # 获取高表达样本的索引（前top_n个）
+                top_coords = spatial_coords[top_indices] # 提取这些样本的空间坐标
+                spatial_std = np.mean(np.std(top_coords, axis=0))# 计算x和y坐标的标准差（综合反映空间分散度）
+                if spatial_std > spatial_threshold: # 若空间分散度超过阈值，则去掉
+                    spatial_pass = False
 
             results.append({
                 'gene': gene,
                 'dispersion_index': disp_index,
-                'concentration_ratio': concentration_ratio
+                'concentration_ratio': concentration_ratio,
+                'spatial_pass': spatial_pass
             })
 
-        # 转换为DataFrame并处理极端值
+        # 指标归一化（映射到0-1范围）
         df = pd.DataFrame(results)
+        df = df[df['spatial_pass']]
 
-        # 4. 指标归一化（映射到0-1范围）
-        # 离散指数：值越大越好（取倒数后归一化，避免inf影响）
-        df['dispersion_norm'] = 1 / (1 + df['dispersion_index'])  # 转换为0-1（值越大越集中）
-        # 集中率：值越大越好（直接归一化）
-        cr_max, cr_min = df['concentration_ratio'].max(), df['concentration_ratio'].min()
-        df['concentration_norm'] = (df['concentration_ratio'] - cr_min) / (cr_max - cr_min + 1e-10)  # 0-1归一化
+        if not df.empty:
+            # 归一化指标
+            disp_max, disp_min = df['dispersion_index'].max(), df['dispersion_index'].min()
+            df['dispersion_norm'] = (df['dispersion_index'] - disp_min) / (disp_max - disp_min + 1e-10)
 
-        # 5. 融合为综合评分（采用排名平均，避免主观权重）
-        # 对两个归一化指标分别排名（升序=1,2,3...）
-        df['disp_rank'] = df['dispersion_norm'].rank(ascending=False)  # 高离散归一值排名靠前
-        df['cr_rank'] = df['concentration_norm'].rank(ascending=False)  # 高集中率排名靠前
-        # 综合评分为排名的平均值（值越小表示综合表现越好）
-        df['combined_score'] = (df['disp_rank'] + df['cr_rank']) / 2
+            cr_max, cr_min = df['concentration_ratio'].max(), df['concentration_ratio'].min()
+            df['concentration_norm'] = (df['concentration_ratio'] - cr_min) / (cr_max - cr_min + 1e-10)
 
-        # 可选：将综合评分转换为0-100的分数（越高越好）
-        max_score = df['combined_score'].max()
-        df['concentration_score'] = 100 * (1 - df['combined_score'] / max_score)
+            # 计算综合评分（采用排名平均，避免主观权重）
+            df['disp_rank'] = df['dispersion_norm'].rank(ascending=False)
+            df['cr_rank'] = df['concentration_norm'].rank(ascending=False)
+            df['combined_score'] = 0.7 * df['disp_rank'] + 0.3 * df['cr_rank']
+
+            max_score = df['combined_score'].max() # 转换为0-100分（越高越好）
+            df['concentration_score'] = 100 * (1 - df['combined_score'] / max_score)
+        else:
+            df['concentration_score'] = 0
 
         return df[['gene', 'concentration_score']]
 
     def calculate_gss_expression_correlation(self, genes: List[str]) -> pd.DataFrame:
         """
         计算GSS分数与表达量的相关性
-
-        参数:
-            genes: 待计算的基因列表
-
-        返回:
-            相关性结果DataFrame
         """
-        results = []
+        # 批量获取基因表达和GSS分数
+        gene_indices = [self._gene_index[gene] for gene in genes]
+        expr_matrix = self._expr_matrix[:, gene_indices].T  # (gene×spot)
+        expr_matrix = np.log1p(expr_matrix)
+        gss_matrix = self.gss_df.loc[genes].values  # (gene×spot)
 
-        for gene in genes:
-            # 获取基因表达量
-            expr = self.adata[:, gene].X
-            if scipy.sparse.issparse(expr):
-                # 使用 toarray() 方法将稀疏矩阵转换为密集矩阵，然后展平
-                expr = expr.toarray().flatten()
+        # 向量化计算Spearman相关性
+        corr_values = []
+        p_values = []
+        for i in range(len(genes)):
+            corr, p = stats.spearmanr(expr_matrix[i], gss_matrix[i])
+            corr_values.append(corr)
+            p_values.append(p)
 
-            # 获取GSS分数
-            gss = self.gss_df.loc[gene].values
+        return pd.DataFrame({
+            'gene': genes,
+            'gss_expr_corr': corr_values,
+            'gss_expr_p_value': p_values
+        })
 
-            # 计算皮尔逊相关系数和p值
-            corr, p_value = stats.spearmanr(expr, gss)
-
-            results.append({
-                'gene': gene,
-                'gss_expr_corr': corr,
-                'gss_expr_p_value': p_value
-            })
-
-        return pd.DataFrame(results)
-
-    def calculate_genes_entropy(self, genes: List[str]) -> pd.DataFrame:
-        """
-        计算考虑空间距离的加权信息熵（熵值越低，表达越集中且空间聚集性越高）
-        权重基于六边形网格邻居关系，距离越近的细胞对熵值计算贡献越大
-
-        参数:
-            genes: 待计算的基因列表
-
-        返回:
-            DataFrame包含基因名和信息熵值，仅保留熵值低于阈值的基因
-        """
-        # 预计算空间权重矩阵（基于六边形网格结构）
-        # 权重矩阵维度: [n_cells, n_cells]，值越大表示空间距离越近
-        coords = self.spatial_coords.values
-        spatial_weights = self._calculate_hexagonal_weights(coords=coords)
-
-        results = []
-        for gene in genes:
-            # 获取基因表达量（处理稀疏矩阵）
-            expr = self.adata[:, gene].X
-            if scipy.sparse.issparse(expr):
-                expr = expr.toarray().flatten()
-            else:
-                expr = expr.flatten()
-
-            # 1. 先保留真实表达值，真实零表达直接设为 0（区分生物学零和技术噪声）
-            expr = np.where(expr > 0, expr, 0)
-
-            # 2. 计算加权表达量（融入邻居信息）
-            weighted_expr = spatial_weights @ expr
-            expr_threshold = np.max(weighted_expr)/50
-            weighted_expr[weighted_expr < expr_threshold] = 0
-
-            # 可视化
-            #------------------------
-            # # 计算基因的加权表达量分布
-            # n, bins, patches = plt.hist(weighted_expr, bins=50)
-            # plt.title(f"{gene}的加权表达量分布")
-            # plt.show()
-            #
-            # # 随机选一个高表达细胞（加权值>0.5），检查其邻居的原始表达
-            # high_idx = np.argmax(weighted_expr > 0.5)
-            # neighbor_indices = np.nonzero(spatial_weights[high_idx])[0]  # 获取该细胞的邻居
-            #
-            # print("高表达细胞的原始表达:", expr[high_idx])
-            # print("邻居的原始表达均值:", expr[neighbor_indices].mean())
-            # print("邻居的加权表达贡献:", spatial_weights[high_idx, neighbor_indices] @ expr[neighbor_indices])
-            #
-            # # 绘制基因表达的空间分布（原始表达 vs 加权表达）
-            # plt.figure(figsize=(12, 5))
-            # plt.subplot(1, 2, 1)
-            # sns.scatterplot(x=self.spatial_coords['x'], y=self.spatial_coords['y'], hue=expr, palette='viridis')
-            # plt.title("原始表达的空间分布")
-            #
-            # plt.subplot(1, 2, 2)
-            # sns.scatterplot(x=self.spatial_coords['x'], y=self.spatial_coords['y'], hue=weighted_expr,
-            #                 palette='viridis')
-            # plt.title("加权表达的空间分布")
-            # plt.show()
-            #
-            # # 随机选一个细胞，可视化其权重分布
-            # cell_idx = np.random.choice(len(self.spatial_coords))
-            # cell_weight = spatial_weights[cell_idx]
-            #
-            # # 绘制该细胞的邻居权重空间分布
-            # neighbor_coords = self.spatial_coords.iloc[np.nonzero(cell_weight)[0]]
-            # neighbor_weights = cell_weight[np.nonzero(cell_weight)]
-            #
-            # plt.figure(figsize=(8, 6))
-            # sns.scatterplot(x=self.spatial_coords['x'], y=self.spatial_coords['y'], color='gray', alpha=0.2)
-            # sns.scatterplot(x=neighbor_coords['x'], y=neighbor_coords['y'], hue=neighbor_weights, palette='viridis')
-            # plt.title(f"细胞 {cell_idx} 的空间权重分布")
-            # plt.legend(title='权重值')
-            # plt.show()
-            #
-            # # 计算每个细胞的概率占比，并排序
-            # prob = weighted_expr / weighted_expr.sum()
-            # sorted_prob = np.sort(prob)[::-1]  # 降序排列
-            #
-            # # 绘制概率分布的“长尾图”
-            # plt.plot(sorted_prob, color='blue')
-            # plt.yscale('log')  # 对数轴更易观察长尾
-            # plt.title("加权概率分布的长尾")
-            # plt.show()
-            # ------------------------
-
-            # 3. 归一化时处理零值，避免除零错误
-            total_weighted = np.sum(weighted_expr)
-            if total_weighted < 1e-10:  # 所有表达都是 0（极端情况）
-                weighted_prob = np.zeros_like(weighted_expr)
-            else:
-                weighted_prob = weighted_expr / total_weighted
-                # 强制极低值为 0，还原真实零表达的影响
-                weighted_prob[weighted_prob < 1e-10] = 0
-
-            # 4. 计算加权信息熵H = -Σp*log2(p)时，给 log 加保护（避免零值的 log 错误）
-            weighted_entropy = -np.sum(
-                weighted_prob * np.log2(weighted_prob + 1e-10)
-            )
-
-            max_entropy = np.log2(self.cells) # 理论最大熵
-
-            results.append({
-                'gene': gene,
-                'entropy': weighted_entropy / max_entropy
-            })
-
-        return pd.DataFrame(results)
-
-    def calculate_morans_i(self, genes: List[str]) -> pd.DataFrame:
+    def calculate_morans_i(self, genes: List[str], spatial_weights) -> pd.DataFrame:
         """
         计算基因表达的Moran's I指数（空间自相关性）
-
-        参数:
-            genes: 待计算的基因列表
-
-        返回:
-            Moran's I结果DataFrame
         """
         coords = self.spatial_coords.values
         n = len(coords)
+        total_weight = spatial_weights.sum()
 
-        # # 1. 高效计算距离矩阵
-        # dist_matrix = distance.squareform(distance.pdist(coords))
-        # np.fill_diagonal(dist_matrix, np.inf)
-        #
-        # # 2. 构建权重矩阵 (距离倒数)
-        # w = 1 / np.maximum(dist_matrix, 1e-10)  # 避免除0
-        # np.fill_diagonal(w, 0)  # 对角线置0
+        # 批量获取基因表达
+        gene_indices = [self._gene_index[gene] for gene in genes]
+        expr_matrix = self._expr_matrix[:, gene_indices].T  # (gene×spot)
+        expr_matrix = np.log1p(expr_matrix)
 
-        #---------------
+        # 向量化计算Moran's I
+        mean_exprs = np.mean(expr_matrix, axis=1)
+        deviations = expr_matrix - mean_exprs[:, np.newaxis]
+        denominators = np.sum(deviations ** 2, axis=1)
 
-        # # 1. 高效计算距离矩阵
-        # dist_matrix = distance.squareform(distance.pdist(coords))
-        # np.fill_diagonal(dist_matrix, np.inf)
-        #
-        # # 2. 构建权重矩阵
-        # bandwidth = np.median(dist_matrix[dist_matrix < np.inf])
-        # w = np.exp(-dist_matrix ** 2 / (2 * bandwidth ** 2))
-        # np.fill_diagonal(w, 0)
-        #
-        # # 3. 行标准化 (处理孤立点)
-        # w_rowsum = w.sum(axis=1)
-        # isolated = w_rowsum == 0
-        # if np.any(isolated):
-        #     print(f"警告: {isolated.sum()}个孤立点存在")
-        #     w_rowsum[isolated] = 1  # 避免除0
-        # w /= w_rowsum[:, None]
+        # 处理零方差
+        valid_mask = denominators > 1e-10
+        morans_i = np.full(len(genes), np.nan)
 
-        w = self._calculate_hexagonal_weights(coords=coords)
+        # 对有效基因计算Moran's I
+        for i in np.where(valid_mask)[0]:
+            numerator = np.sum(spatial_weights * np.outer(deviations[i], deviations[i]))
+            morans_i[i] = (n / total_weight) * (numerator / denominators[i])
 
-        # 4. 预计算全局常量
-        results = []
-        total_weight = w.sum()
+        return pd.DataFrame({
+            'gene': genes,
+            'morans_i': morans_i
+        })
 
-        for gene in genes:
-            expr = self.adata[:, gene].X
-            expr = np.arcsinh(expr)  # 或 np.log1p(expr)
-
-            if scipy.sparse.issparse(expr):
-                expr = expr.toarray().flatten()
-
-            # 5. 计算Moran's I
-            mean_expr = np.mean(expr)
-            deviations = expr - mean_expr
-
-            numerator = np.sum(w * np.outer(deviations, deviations))
-            denominator = np.sum(deviations ** 2)
-
-            if denominator < 1e-10:  # 处理零方差
-                morans_i = np.nan
-            else:
-                morans_i = (n / total_weight) * (numerator / denominator)
-
-            results.append({
-                'gene': gene,
-                'morans_i': morans_i
-            })
-
-        return pd.DataFrame(results)
-
-    def _calculate_hexagonal_weights(self, coords, max_rings=2, decay_rate=0.1, tolerance=0.05):
+    def _calculate_hexagonal_weights(self, spatial_coords, k=8):
         """
-        为六边形网格结构计算空间权重，支持多环邻居
-
-        参数:
-            coords: 细胞坐标数组 (n_samples, 2)
-            max_rings: 要考虑的最大环数（默认为2，即第一环和第二环）
-            decay_rate: 每环权重的衰减率（0-1之间）
-            tolerance: 距离容差系数，用于识别邻居
-
-        返回:
-            w: 空间权重矩阵 (n_samples, n_samples)
+        使用K近邻计算动态空间权重w
         """
-        n = len(coords)
-        w = np.zeros((n, n))
+        n = len(spatial_coords)
+        # 使用scipy的高效距离计算
+        dist_matrix = distance.cdist(spatial_coords, spatial_coords, metric='euclidean')
 
-        # 计算距离矩阵
-        dist_matrix = distance.squareform(distance.pdist(coords))
-        np.fill_diagonal(dist_matrix, np.inf)  # 避免自环
-
-        # 确定第一近邻距离（六边形边长）
-        first_neighbor_dist = np.min(dist_matrix)
-
-        # 预计算各环的理论距离阈值（第n环距离≈n×边长）
-        ring_thresholds = [(i + 1) * first_neighbor_dist for i in range(max_rings)]
-
-        # 为每个点分配权重
+        # 排除自身并获取K近邻（使用argpartition优化排序）
+        neighbors = np.zeros((n, k), dtype=int)
         for i in range(n):
-            # 初始化已分配的邻居集合
-            assigned_neighbors = set()
+            dists = dist_matrix[i]
+            dists[i] = np.inf  # 排除自身
+            # 使用argpartition获取前k个最小值的索引
+            neighbors[i] = np.argpartition(dists, k)[:k]
 
-            # 按环依次处理
-            for ring in range(max_rings):
-                # 确定当前环的距离范围
-                lower_bound = ring_thresholds[ring - 1] * (1 + tolerance) if ring > 0 else 0
-                upper_bound = ring_thresholds[ring] * (1 + tolerance)
-
-                # 找出当前环的邻居
-                current_ring_neighbors = np.where(
-                    (dist_matrix[i] > lower_bound) &
-                    (dist_matrix[i] <= upper_bound)
-                )[0]
-
-                # 排除已分配给前面环的邻居
-                current_ring_neighbors = [j for j in current_ring_neighbors if j not in assigned_neighbors]
-
-                # 为当前环邻居分配权重（按环数衰减）
-                if current_ring_neighbors:
-                    weight = decay_rate ** ring  # 权重衰减公式：decay_rate的环数次幂
-                    w[i, current_ring_neighbors] = weight / len(current_ring_neighbors)
-
-                    # 将这些邻居添加到已分配集合
-                    assigned_neighbors.update(current_ring_neighbors)
-
-        # 行标准化（确保每行权重和为1）
-        row_sums = w.sum(axis=1)
-        row_sums[row_sums == 0] = 1.0  # 防止除零
-        w /= row_sums[:, np.newaxis]
+        # 构建权重矩阵
+        w = np.zeros((n, n))
+        for i in range(n):
+            w[i, neighbors[i]] = 1 / k
 
         return w
 
     def run_pipeline(self) -> Tuple[List[str], pd.DataFrame]:
         """
         运行完整的基因选择与验证流程
-
-        返回:
-            最终选择的基因列表和验证结果DataFrame
         """
+        # 如果细胞数量太少，就直接跳过
+        if self.cells <= 700:
+            if self.output_dir:
+                skip_reason = f"细胞数量为{self.cells},不足700!"
+                skip_info = pd.DataFrame({
+                    'timestamp': [pd.Timestamp.now()],
+                    'cells': [self.cells],
+                    'reason': [skip_reason],
+                    'status': ['skipped']
+                })
+                os.makedirs(self.output_dir, exist_ok=True)
+                skip_info.to_csv(self.output_dir + "_processing_log.csv")
+                print(f"验证结果已保存至 {self.output_dir}")
+            return [], pd.DataFrame()
+
         # 1. 基于表达量和GSS分数筛选基因
         high_expr_genes = self.select_genes_by_expression()
         high_gss_genes = self.select_genes_by_gss()
 
         # 2. 整合两种指标选择基因
         initial_genes = list(
-            set(high_expr_genes.index) &
+            set(high_expr_genes) &
             set(high_gss_genes.index)
         )
-
         print(f"初步筛选出 {len(initial_genes)} 个基因")
 
-        # 定义每个步骤的最大基因数量（可根据需求调整）
-        max_genes = min(100, int(0.1 * len(initial_genes)))  # 设置单步骤最大基因数
+        # 定义每个步骤的最大基因数量
+        max_genes = min(100, int(0.1 * len(initial_genes))) if initial_genes else 0
 
-        # ---------
-        # 运行空间差异表达分析
-        # spatial_results = self.calculate_spatial_gene_qval(initial_genes)
-        # # 筛选显著的空间特异性基因（q值<0.05）
-        # high_spatialde_genes = spatial_results[spatial_results['qval'] < 0.05].index.tolist()
-        # ---------
+        # 预计算空间权重矩阵（基于K近邻）
+        spatial_coords = self.spatial_coords.values
+        spatial_weights = self._calculate_hexagonal_weights(spatial_coords=spatial_coords)
 
-        # 3.0 计算表达离散度和集中性指标（越高越好）
-        concentration_results = self.calculate_expression_concentration(initial_genes)
-        # 先按阈值筛选，再按分数降序取前N个
+        # 3.1 计算表达离散度和集中性指标（越高越好）
+        concentration_results = self.calculate_expression_concentration(initial_genes, spatial_coords)
         filtered_concentration = concentration_results[
             concentration_results['concentration_score'] > self.concentration_threshold
-            ].sort_values('concentration_score', ascending=False)  # 降序排序
+            ].sort_values('concentration_score', ascending=False)
         high_concentration_genes = filtered_concentration.head(max_genes)['gene'].tolist()
         print(f"基于表达离散度和集中性，保留 {len(high_concentration_genes)} 个基因（最多{max_genes}个）")
 
-        # 3.1 计算GSS与表达量的相关性（越高越好）
+        # 3.2 计算GSS与表达量的相关性（越高越好）
         corr_results = self.calculate_gss_expression_correlation(initial_genes)
         filtered_corr = corr_results[
-            corr_results['gss_expr_corr'] > self.corr_threshold
-            ].sort_values('gss_expr_corr', ascending=False)  # 降序排序
+            abs(corr_results['gss_expr_corr']) > self.corr_threshold
+            ].sort_values('gss_expr_corr', ascending=False)
         high_corr_genes = filtered_corr.head(max_genes)['gene'].tolist()
         print(f"基于GSS-表达量相关性，保留 {len(high_corr_genes)} 个基因（最多{max_genes}个）")
 
-        # 3.2 计算GSS的信息熵（越低越好）
-        entropy_results = self.calculate_genes_entropy(initial_genes)
-        filtered_entropy = entropy_results[
-            entropy_results['entropy'] < self.entropy_threshold
-            ].sort_values('entropy', ascending=True)  # 升序排序（熵值越低越优）
-        high_entropy_genes = filtered_entropy.head(max_genes)['gene'].tolist()
-        print(f"基于GSS的信息熵，保留 {len(high_entropy_genes)} 个基因（最多{max_genes}个）")
-
         # 3.3 计算空间自相关性（越高越好）
-        morans_i_results = self.calculate_morans_i(initial_genes)
+        morans_i_results = self.calculate_morans_i(initial_genes, spatial_weights)
         filtered_morans = morans_i_results[
             morans_i_results['morans_i'] > self.morans_i_threshold
-            ].sort_values('morans_i', ascending=False)  # 降序排序
+            ].sort_values('morans_i', ascending=False)
         high_spatial_genes = filtered_morans.head(max_genes)['gene'].tolist()
         print(f"基于空间自相关性，保留 {len(high_spatial_genes)} 个基因（最多{max_genes}个）")
 
@@ -590,11 +425,9 @@ class GssGeneSelector:
             reliable_genes = initial_genes
 
         # 4. 整合所有验证结果
-        # 取所有通过至少一项验证的基因
         all_validated_genes = list(
             set(high_concentration_genes) |
             set(high_corr_genes) |
-            set(high_entropy_genes) |
             set(high_spatial_genes)
         )
 
@@ -603,47 +436,40 @@ class GssGeneSelector:
             'gene': all_validated_genes,
             'pass_concentration': [g in high_concentration_genes for g in all_validated_genes],
             'pass_gss_expr_corr': [g in high_corr_genes for g in all_validated_genes],
-            'pass_entropy': [g in high_entropy_genes for g in all_validated_genes],
             'pass_spatial_auto_corr': [g in high_spatial_genes for g in all_validated_genes],
         })
 
         # 计算每个基因通过的验证数量
         all_results['count'] = all_results.iloc[:, 1:].sum(axis=1)
 
-        # 提取每个基因的表达离散度和集中性归一化分数
-        concentration_dict = {row['gene']: round(row['concentration_score'], 2) for _, row in concentration_results.iterrows()}
+        # 提取各项指标
+        concentration_dict = {row['gene']: round(row['concentration_score'], 2) for _, row in
+                              concentration_results.iterrows()}
         all_results['concentration_score'] = all_results['gene'].map(concentration_dict)
 
-        # 提取每个基因的GSS-表达量相关性
         corr_dict = {row['gene']: round(row['gss_expr_corr'], 2) for _, row in corr_results.iterrows()}
         all_results['gss_expr_corr'] = all_results['gene'].map(corr_dict)
 
-        # 提取每个基因的信息熵分数
-        entropy_dict = {row['gene']: round(row['entropy'], 2) for _, row in entropy_results.iterrows()}
-        all_results['entropy'] = all_results['gene'].map(entropy_dict)
-
-        # 提取每个基因的空间自相关系数
         morans_i_dict = {row['gene']: round(row['morans_i'], 2) for _, row in morans_i_results.iterrows()}
         all_results['morans_i'] = all_results['gene'].map(morans_i_dict)
 
-        # 按验证数量和相关性排序
+        # 排序
         all_results = all_results.sort_values(
-            ['count', 'concentration_score', 'gss_expr_corr', 'entropy', 'morans_i'],
-            ascending=[False, False, False, False, False]
+            ['count', 'concentration_score', 'gss_expr_corr', 'morans_i'],
+            ascending=[False, False, False, False]
         )
 
         # 通过所有验证的基因
         cross_genes = all_results[
             (all_results['pass_concentration']) &
             (all_results['pass_gss_expr_corr']) &
-            (all_results['pass_entropy']) &
             (all_results['pass_spatial_auto_corr'])
             ]['gene'].tolist()
         print(f"一共有{len(cross_genes)}个基因通过了全部的筛选流程：{cross_genes}")
 
         if self.output_dir:
             os.makedirs(self.output_dir, exist_ok=True)
-        all_results.to_csv(self.output_dir+"_selected_genes.csv", index=False, sep='\t')
-        print(f"验证结果已保存至 {self.output_dir}")
+            all_results.to_csv(self.output_dir+ "_selected_genes.csv", index=False, sep='\t')
+            print(f"验证结果已保存至 {self.output_dir}")
 
         return all_validated_genes, all_results

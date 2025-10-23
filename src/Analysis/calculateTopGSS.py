@@ -1,322 +1,664 @@
 
+import numpy as np
+import pandas as pd
+from sklearn.cluster import MiniBatchKMeans
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import silhouette_score
+import warnings
 import os
 import json
 import argparse
-import numpy as np
-import pandas as pd
 import scanpy as sc
 import matplotlib.pyplot as plt
-from scipy.stats import gaussian_kde
-from scipy.signal import find_peaks
 from src.Utils.DataProcess import get_self_data_dir, get_hest_data_dir, set_chinese_font, read_data
-from src.Utils.GssGeneCalculator import GssGeneCalculator
+from src.Utils.GssGeneCalculator_parallel import GssGeneCalculator
+import seaborn as sns
+
+warnings.filterwarnings('ignore')
 
 
-def get_high_specificity_genes_kde_single_cell(gss_values, min_peak_height=0.05):
+# def extract_distribution_features(gss_matrix):
+#     """
+#     向量化版本的特征提取
+#     gss_matrix: (n_spots, n_genes) 的numpy数组
+#     """
+#     n_spots = gss_matrix.shape[0]
+#
+#     # 基础统计量 - 一次性计算所有spots
+#     features = {'mean': np.mean(gss_matrix, axis=1), 'std': np.std(gss_matrix, axis=1),
+#                 'median': np.median(gss_matrix, axis=1), 'range': np.ptp(gss_matrix, axis=1),
+#                 'q10': np.percentile(gss_matrix, 10, axis=1), 'q90': np.percentile(gss_matrix, 90, axis=1),
+#                 'q99': np.percentile(gss_matrix, 99, axis=1), 'zero_ratio': np.mean(gss_matrix == 0, axis=1),
+#                 'skewness': np.array([stats.skew(row) for row in gss_matrix]),
+#                 'kurtosis': np.array([stats.kurtosis(row) for row in gss_matrix]),
+#                 'iqr': np.array([stats.iqr(row) for row in gss_matrix])}
+#
+#     # 需要循环但可以部分向量化的特征
+#
+#     # 变异系数
+#     with np.errstate(divide='ignore', invalid='ignore'):
+#         features['cv'] = np.where(features['mean'] != 0, features['std'] / features['mean'], 1.0)
+#
+#     # 批量处理KDE峰值检测
+#     peak_counts = []
+#     main_peak_positions = []
+#     main_peak_heights = []
+#     peak_distances = []
+#
+#     for i in range(n_spots):
+#         try:
+#             kde = stats.gaussian_kde(gss_matrix[i])
+#             x_range = np.linspace(np.min(gss_matrix[i]), np.max(gss_matrix[i]), 100)  # 减少点数
+#             kde_values = kde(x_range)
+#             peaks, properties = find_peaks(kde_values, height=np.max(kde_values) * 0.3)
+#
+#             peak_counts.append(len(peaks))
+#
+#             if len(peaks) >= 1:
+#                 main_peak_positions.append(x_range[peaks[0]])
+#                 main_peak_heights.append(kde_values[peaks[0]])
+#                 if len(peaks) >= 2:
+#                     peak_distances.append(x_range[peaks[-1]] - x_range[peaks[0]])
+#                 else:
+#                     peak_distances.append(0)
+#             else:
+#                 main_peak_positions.append(np.median(gss_matrix[i]))
+#                 main_peak_heights.append(1)
+#                 peak_distances.append(0)
+#
+#         except:
+#             peak_counts.append(1)
+#             main_peak_positions.append(np.median(gss_matrix[i]))
+#             main_peak_heights.append(1)
+#             peak_distances.append(0)
+#
+#     features['peak_count'] = np.array(peak_counts)
+#     features['main_peak_position'] = np.array(main_peak_positions)
+#     features['main_peak_height'] = np.array(main_peak_heights)
+#     features['peak_distance'] = np.array(peak_distances)
+#
+#     # 极端值占比
+#     features['pct_above_mean2sd'] = np.mean(gss_matrix > (features['mean'][:, None] + 2 * features['std'][:, None]),
+#                                             axis=1)
+#     features['pct_above_median1.5iqr'] = np.mean(
+#         gss_matrix > (features['median'][:, None] + 1.5 * features['iqr'][:, None]), axis=1)
+#
+#     # 尾比
+#     with np.errstate(divide='ignore', invalid='ignore'):
+#         tail_ratio = np.where(
+#             (features['median'] - features['q10']) > 0,
+#             (features['q99'] - features['median']) / (features['median'] - features['q10']),
+#             1.0
+#         )
+#     features['tail_ratio'] = tail_ratio
+#
+#     # 熵（简化计算）
+#     try:
+#         hist_entropy = []
+#         for i in range(n_spots):
+#             hist, _ = np.histogram(gss_matrix[i], bins=20, density=True)
+#             hist = hist[hist > 0]
+#             hist_entropy.append(-np.sum(hist * np.log(hist)) if len(hist) > 0 else 0.0)
+#         features['entropy'] = np.array(hist_entropy)
+#     except:
+#         features['entropy'] = np.zeros(n_spots)
+#
+#     # KS检验（抽样计算以节省时间）
+#     ks_pvalues = []
+#     sample_size = min(1000, gss_matrix.shape[1])
+#     for i in range(n_spots):
+#         try:
+#             if gss_matrix.shape[1] > sample_size:
+#                 sample_data = np.random.choice(gss_matrix[i], sample_size, replace=False)
+#             else:
+#                 sample_data = gss_matrix[i]
+#             _, pvalue = stats.kstest(sample_data, 'norm')
+#             ks_pvalues.append(pvalue)
+#         except:
+#             ks_pvalues.append(0.0)
+#     features['ks_norm_pvalue'] = np.array(ks_pvalues)
+#
+#     return pd.DataFrame(features)
+#
+#
+# def distribution_labeling(cluster_features):
+#     """优化版的分布类型标注"""
+#     distribution_types = {}
+#
+#     for cluster_id in cluster_features.index:
+#         cf = cluster_features.loc[cluster_id]
+#
+#         # 安全获取特征值
+#         zero_ratio = cf.get('zero_ratio', 0)
+#         peak_count = cf.get('peak_count', 1)
+#         skewness = cf.get('skewness', 0)
+#         kurtosis = cf.get('kurtosis', 0)
+#         data_range = cf.get('range', 0)
+#         cv_val = cf.get('cv', 1)
+#         ks_pvalue = cf.get('ks_norm_pvalue', 0)
+#
+#         # 1. 零膨胀分布检测
+#         if zero_ratio > 0.7:
+#             distribution_types[cluster_id] = 'zero_inflated'
+#
+#         # 2. 多峰分布细化
+#         elif peak_count >= 3:
+#             distribution_types[cluster_id] = 'multimodal'
+#         elif peak_count == 2:
+#             if abs(skewness) < 0.3:
+#                 distribution_types[cluster_id] = 'symmetric_bimodal'
+#             else:
+#                 distribution_types[cluster_id] = 'asymmetric_bimodal'
+#
+#         # 3. 偏态分布细化
+#         elif skewness > 1.2:
+#             distribution_types[cluster_id] = 'right_skewed'
+#         elif skewness < -1.2:
+#             distribution_types[cluster_id] = 'left_skewed'
+#         elif abs(skewness) > 0.8:
+#             distribution_types[cluster_id] = 'moderately_skewed'
+#
+#         # 4. 重尾分布检测
+#         elif kurtosis > 2.5:
+#             distribution_types[cluster_id] = 'heavy_tailed'
+#         elif kurtosis < 0.5:
+#             distribution_types[cluster_id] = 'light_tailed'
+#
+#         # 5. 均匀分布检测
+#         elif (data_range > 0 and
+#               cv_val < 0.3 and
+#               abs(skewness) < 0.5):
+#             distribution_types[cluster_id] = 'uniform'
+#
+#         # 6. 正态分布
+#         elif (abs(skewness) < 0.3 and
+#               abs(kurtosis) < 1 and
+#               ks_pvalue > 0.1):
+#             distribution_types[cluster_id] = 'normal'
+#
+#         # 7. 复杂分布
+#         else:
+#             distribution_types[cluster_id] = 'complex'
+#
+#     return distribution_types
+
+
+def extract_distribution_features(gss_matrix):
     """
-    单个细胞的KDE法筛选高特异性基因
-    逻辑：通过核密度估计找到GSS值分布的峰值，取峰值右侧显著下降后的高值基因
-    参数：
-    - gss_values: 单个细胞的GSS值（pandas Series，索引为基因名）
-    - min_peak_height: 检测峰值的最小高度阈值（归一化后）
-    返回：
-    - 筛选出的高特异性基因列表
+    特征提取 - 在保持功能的前提下最大化速度
+    特征名称与原版保持一致，确保后续步骤兼容
     """
-    # 提取非零GSS值（零值无意义）
-    non_zero_gss = gss_values[gss_values > 0].sort_values(ascending=False)
+    n_spots, n_genes = gss_matrix.shape
 
-    # 核密度估计（KDE）
-    kde = gaussian_kde(non_zero_gss.values)
-    x = np.linspace(non_zero_gss.min(), non_zero_gss.max(), 1000)  # GSS值范围
-    y = kde(x)  # 密度值
-    y_norm = y / y.max()  # 归一化到0-1，便于统一阈值
+    # 基础统计量
+    features = {
+        'mean': np.mean(gss_matrix, axis=1),
+        'std': np.std(gss_matrix, axis=1),
+        'median': np.median(gss_matrix, axis=1),
+        'range': np.ptp(gss_matrix, axis=1),
+        'zero_ratio': np.mean(gss_matrix == 0, axis=1),
+        'q10': np.percentile(gss_matrix, 10, axis=1),
+        'q90': np.percentile(gss_matrix, 90, axis=1),
+        'q99': np.percentile(gss_matrix, 99, axis=1),
+        'iqr': np.percentile(gss_matrix, 75, axis=1) - np.percentile(gss_matrix, 25, axis=1),
+    }
 
-    # 检测峰值（高特异性基因可能形成独立峰值）
-    peaks, peak_info = find_peaks(y_norm, height=min_peak_height)
+    # 计算分位数用于近似特征
+    q25 = np.percentile(gss_matrix, 25, axis=1)
+    q75 = np.percentile(gss_matrix, 75, axis=1)
 
-    # 选择最高的峰值作为主峰值（最可能的高特异性基因分布中心）
-    main_peak_idx = peaks[np.argmax(peak_info['peak_heights'])]
-    main_peak_gss = x[main_peak_idx]
+    # 1. 近似偏度
+    mean = features['mean'][:, None]
+    std = features['std'][:, None]
+    normalized = (gss_matrix - mean) / (std + 1e-8)
+    features['skewness'] = np.mean(normalized ** 3, axis=1)  # 仍叫skewness
 
-    # 找到峰值右侧密度下降到峰值2%的位置作为阈值（动态比例）
-    right_of_peak = x[x >= main_peak_gss]  # 仅看峰值右侧
-    right_density = y_norm[x >= main_peak_gss]
-    threshold_idx = np.argmax(right_density <= 0.02 * peak_info['peak_heights'].max())
+    # 2. 近似峰度
+    features['kurtosis'] = np.mean(normalized ** 4, axis=1) - 3  # 仍叫kurtosis
 
-    if threshold_idx == 0:  # 未找到下降点时，用峰值作为阈值
-        threshold = main_peak_gss
-    else:
-        threshold = right_of_peak[threshold_idx]
+    # 3. 近似多峰检测（保持原名称但含义不同）
+    # 基于分位数间距的比值来检测多峰
+    q_diff_ratio = (features['q90'] - q75) / (q75 - q25 + 1e-8)
+    # 将连续值转换为近似的峰值计数
+    peak_count_approx = np.ones(n_spots)  # 默认单峰
+    peak_count_approx[q_diff_ratio > 2.0] = 3  # 高比值认为是多峰
+    peak_count_approx[(q_diff_ratio > 1.2) & (q_diff_ratio <= 2.0)] = 2  # 中等比值认为是双峰
+    features['peak_count'] = peak_count_approx  # 仍叫peak_count
 
-    # 返回阈值以上的基因
-    return non_zero_gss[non_zero_gss >= threshold].index.tolist()
+    # 4. 主峰位置近似（用中位数代替）
+    features['main_peak_position'] = features['median']  # 简化
 
+    # 5. 简化的KS检验p值（用偏度峰度组合判断正态性）
+    normal_likelihood = np.exp(-0.5 * (features['skewness'] ** 2 + features['kurtosis'] ** 2))
+    features['ks_norm_pvalue'] = normal_likelihood  # 仍叫ks_norm_pvalue但含义不同
 
-def get_high_specificity_genes_nd_single_cell(gss_values, multiplier=3, use_median=False):
-    """
-    单个细胞的均值+标准差（或中位数+四分位距）筛选法
-    逻辑：取显著高于整体水平的基因（适应偏态分布）
-    参数：
-    - gss_values: 单个细胞的GSS值（pandas Series，索引为基因名）
-    - multiplier: 倍数（标准差或四分位距的倍数）
-    - use_median: 是否使用中位数+四分位距（适合偏态分布）
-    返回：
-    - 筛选出的高特异性基因列表
-    """
-    # 提取非零GSS值
-    non_zero_gss = gss_values[gss_values > 0]
+    # 6. 其他必要特征
+    features['pct_above_mean2sd'] = np.mean(gss_matrix > (features['mean'][:, None] + 2 * features['std'][:, None]),
+                                            axis=1)
+    features['pct_above_median1.5iqr'] = np.mean(
+        gss_matrix > (features['median'][:, None] + 1.5 * features['iqr'][:, None]), axis=1)
 
-    # 计算阈值（根据分布类型选择方法）
-    if use_median:
-        # 中位数+四分位距（适合偏态分布，抗极端值）
-        median = np.median(non_zero_gss.values)
-        iqr = np.percentile(non_zero_gss.values, 75) - np.percentile(non_zero_gss.values, 25)
-        threshold = median + multiplier * iqr
-    else:
-        # 均值+标准差（适合近似正态分布）
-        mean = np.mean(non_zero_gss.values)
-        std = np.std(non_zero_gss.values)
-        threshold = mean + multiplier * std
+    # 变异系数
+    features['cv'] = np.where(features['mean'] != 0, features['std'] / features['mean'], 0)
 
-    # 确保阈值不低于最大GSS值的10%（避免阈值过高导致无结果）
-    threshold = max(threshold, non_zero_gss.max() * 0.1)
-    return non_zero_gss[non_zero_gss >= threshold].index.tolist()
+    # 尾比
+    features['tail_ratio'] = np.where(
+        (features['median'] - features['q10']) > 0,
+        (features['q99'] - features['median']) / (features['median'] - features['q10'] + 1e-8),
+        1.0
+    )
 
-
-def get_high_specificity_genes_top_n_single_cell(gss_values, top_n=10, min_threshold=None):
-    """
-    单个细胞的Top-N筛选法
-    逻辑：取GSS值最高的N个基因（结合绝对阈值避免低质量基因）
-    参数：
-    - gss_values: 单个细胞的GSS值（pandas Series，索引为基因名）
-    - top_n: 最多返回的基因数量
-    - min_threshold: 最低GSS值阈值（低于此值的基因即使排名靠前也排除）
-    返回：
-    - 筛选出的高特异性基因列表
-    """
-    # 降序排列所有基因（包括零值，但零值会被过滤）
-    sorted_gss = gss_values.sort_values(ascending=False)
-    # 过滤零值
-    sorted_gss = sorted_gss[sorted_gss > 0]
-
-    # 应用绝对阈值（如果设置）
-    if min_threshold is not None:
-        sorted_gss = sorted_gss[sorted_gss >= min_threshold]
-
-    # 取前N个（如果不足N个则返回全部）
-    n = min(top_n, len(sorted_gss))
-    return sorted_gss.head(n).index.tolist()
+    return pd.DataFrame(features)
 
 
-def get_distribution_features(gss_values, min_peak_height=0.05, visualize=True):
-    """
-    分析GSS值的分布特征，可选可视化分布曲线及关键指标
-    参数：
-    - gss_values: 单个细胞的GSS值（pandas Series）
-    - min_peak_height: 检测峰值的最小高度阈值（归一化后）
-    - visualize: 是否生成可视化图
-    返回：
-    - features: 分布特征字典
-    """
-    non_zero_gss = gss_values[gss_values > 0].values.astype(np.float64)
-    n_non_zero = len(non_zero_gss)
+def distribution_labeling(cluster_features):
+    """分布类型标注 - 调整阈值以适应近似特征"""
+    distribution_types = {}
 
-    # 1. 基础统计特征计算
-    if n_non_zero == 0:
-        features = {
-            "n_non_zero": 0,
-            "skewness": 0,  # 偏度（正值=右偏，负值=左偏，0=对称）
-            "kurtosis": 0,  # 峰度（正值=尖峰，负值=平峰，0=正态）
-            "n_peaks": 0,  # KDE检测到的峰值数量
-            "has_high_tail": False,  # 是否有高值尾部（前0.5%高值/中位值 > 1.3）
-            "mean": 0,
-            "median": 0,
-            "top5p": 0
-        }
-    else:
-        mean_gss = np.mean(non_zero_gss)
-        median_gss = np.median(non_zero_gss)
-        top5p_gss = np.percentile(non_zero_gss, 99.5)  # 前0.5%高值阈值
+    for cluster_id in cluster_features.index:
+        cf = cluster_features.loc[cluster_id]
 
-        # 检查数据是否几乎恒定
-        data_range = np.max(non_zero_gss) - np.min(non_zero_gss)
-        if data_range < 1e-8:  # 使用范围而不是方差作为判断条件
-            skew_val = 0.0
-            kurt_val = 0.0
+        zero_ratio = cf.get('zero_ratio', 0)
+        peak_count = cf.get('peak_count', 1)  # 近似值
+        skewness = cf.get('skewness', 0)  # 近似值
+        kurtosis = cf.get('kurtosis', 0)  # 近似值
+        ks_pvalue = cf.get('ks_norm_pvalue', 0)  # 近似值
+
+        # 调整阈值以适应近似特征
+        if zero_ratio > 0.7:
+            distribution_types[cluster_id] = 'zero_inflated'
+        elif peak_count >= 2.5:  # 调整阈值，因为现在是连续值
+            distribution_types[cluster_id] = 'multimodal'
+        elif peak_count >= 1.5:
+            distribution_types[cluster_id] = 'bimodal'
+        elif skewness > 1.0:  # 调整阈值
+            distribution_types[cluster_id] = 'right_skewed'
+        elif skewness < -1.0:  # 调整阈值
+            distribution_types[cluster_id] = 'left_skewed'
+        elif kurtosis > 2.0:  # 调整阈值
+            distribution_types[cluster_id] = 'heavy_tailed'
+        elif ks_pvalue > 0.3:  # 调整阈值，因为现在是连续值
+            distribution_types[cluster_id] = 'normal'
         else:
-            # 使用更稳健的偏度和峰度计算方法
+            distribution_types[cluster_id] = 'complex'
+
+    return distribution_types
+
+
+def precompute_thresholds_batch(gss_matrix, cluster_labels, distribution_types):
+    """批量预计算所有spots的阈值"""
+    n_spots = gss_matrix.shape[0]
+    n_genes = gss_matrix.shape[1]
+    thresholds = np.zeros(n_spots)
+
+    if(n_genes < 1000):
+        for cluster_id in np.unique(cluster_labels):
+            cluster_mask = (cluster_labels == cluster_id)
+            cluster_data = gss_matrix[cluster_mask]
+            dist_type = distribution_types.get(cluster_id, 'complex')
+
+            if dist_type == 'zero_inflated':
+                # 80%分位
+                non_zero_arrays = [row[row > 0] for row in cluster_data]
+                percentiles = [np.percentile(arr, 80) if len(arr) > 0 else 0 for arr in non_zero_arrays]
+                thresholds[cluster_mask] = percentiles
+
+            elif dist_type == 'normal':
+                # 均值+1.3倍标准差
+                means = np.mean(cluster_data, axis=1)
+                stds = np.std(cluster_data, axis=1)
+                thresholds[cluster_mask] = means + 1.3 * stds
+
+            elif dist_type == 'right_skewed':
+                # 75%分位+0.1*IQR
+                q75 = np.percentile(cluster_data, 75, axis=1)
+                q25 = np.percentile(cluster_data, 25, axis=1)
+                iqr = q75 - q25  # 用75%分位计算IQR，进一步降低阈值
+                thresholds[cluster_mask] = q75 + 0.1 * iqr
+
+            elif dist_type == 'multimodal':
+                # 85%分位
+                thresholds[cluster_mask] = np.percentile(cluster_data, 85, axis=1)
+
+            elif dist_type == 'symmetric_bimodal':
+                # 75%分位
+                thresholds[cluster_mask] = np.percentile(cluster_data, 75, axis=1)
+
+            else:  # 复杂类型
+                # 88%分位
+                thresholds[cluster_mask] = np.percentile(cluster_data, 88, axis=1)
+    else:
+        for cluster_id in np.unique(cluster_labels):
+            cluster_mask = (cluster_labels == cluster_id)
+            cluster_data = gss_matrix[cluster_mask]
+            dist_type = distribution_types.get(cluster_id, 'complex')
+
+            if dist_type == 'zero_inflated':
+                # 原95%分位 -> 92%分位
+                non_zero_arrays = [row[row > 0] for row in cluster_data]
+                percentiles = [np.percentile(arr, 92) if len(arr) > 0 else 0 for arr in non_zero_arrays]
+                thresholds[cluster_mask] = percentiles
+
+            elif dist_type == 'normal':
+                # 原均值+2倍标准差 -> 原均值+1.8倍标准差
+                means = np.mean(cluster_data, axis=1)
+                stds = np.std(cluster_data, axis=1)
+                thresholds[cluster_mask] = means + 1.8 * stds
+
+            elif dist_type == 'right_skewed':
+                # 原75%分位+1.5*IQR -> 降低到75%分位+1.2*IQR
+                q75 = np.percentile(cluster_data, 75, axis=1)
+                q25 = np.percentile(cluster_data, 25, axis=1)
+                iqr = q75 - q25  # 用75%分位计算IQR，进一步降低阈值
+                thresholds[cluster_mask] = q75 + 1.2 * iqr
+
+            elif dist_type == 'multimodal':
+                # 原85%分位 -> 不变
+                thresholds[cluster_mask] = np.percentile(cluster_data, 85, axis=1)
+
+            elif dist_type == 'symmetric_bimodal':
+                # 原75%分位 -> 不变
+                thresholds[cluster_mask] = np.percentile(cluster_data, 75, axis=1)
+
+            else:  # 复杂类型
+                # 原90%分位 -> 增加到98%分位
+                thresholds[cluster_mask] = np.percentile(cluster_data, 98, axis=1)
+
+    return thresholds
+
+
+def run_gss_analysis(mk_score_df, adata, output_dir, max_clusters=8):
+    """针对大规模数据优化的GSS分析逻辑"""
+    print("开始GSS分析...")
+
+    # 1. 数据准备
+    valid_spots = [spot for spot in adata.obs_names if spot in mk_score_df.columns]
+    print(f"处理 {len(valid_spots)} 个有效spots, {mk_score_df.shape[0]} 个基因")
+
+    # 直接使用numpy数组，避免多次复制
+    gss_matrix = mk_score_df[valid_spots].values.T.astype(np.float32)  # (spots, genes)，使用float32节省内存
+
+    # 2. 向量化特征提取
+    print("步骤1: 向量化特征提取...")
+    feature_matrix = extract_distribution_features(gss_matrix)
+
+    # 3. 优化的聚类 - 使用MiniBatchKMeans处理大数据
+    print("步骤2: 聚类分析...")
+    scaler = StandardScaler()
+    features_scaled = scaler.fit_transform(feature_matrix)
+
+    # 确定最优聚类数（简化版）
+    n_samples = len(feature_matrix)
+    max_k = min(max_clusters, n_samples // 10)  # 确保每个簇至少有10个样本
+
+    best_k = 2
+    best_silhouette = -1
+
+    for k in range(2, max_k + 1):
+        if n_samples < k * 5:  # 更严格的样本数检查
+            continue
+
+        kmeans = MiniBatchKMeans(n_clusters=k, random_state=42, batch_size=1000, n_init=3)
+        labels = kmeans.fit_predict(features_scaled)
+
+        if len(np.unique(labels)) > 1:
             try:
-                # 使用基于分位数的偏度和峰度估计（Bowley偏度和Moors峰度）
-                q75, q25 = np.percentile(non_zero_gss, [75, 25])
-                q90, q10 = np.percentile(non_zero_gss, [90, 10])
-                q87_5, q62_5, q37_5, q12_5 = np.percentile(non_zero_gss, [87.5, 62.5, 37.5, 12.5])
-
-                # Bowley偏度
-                if (q75 - q25) > 1e-10:
-                    skew_val = (q75 + q25 - 2 * median_gss) / (q75 - q25)
+                # 使用子采样计算轮廓系数以加速
+                if n_samples > 1000:
+                    indices = np.random.choice(n_samples, min(1000, n_samples), replace=False)
+                    sil_sample = silhouette_score(features_scaled[indices], labels[indices])
                 else:
-                    skew_val = 0.0
+                    sil_sample = silhouette_score(features_scaled, labels)
 
-                # Moors峰度
-                if (q75 - q25) > 1e-10:
-                    kurt_val = (q87_5 - q62_5 - q37_5 + q12_5) / (q75 - q25)
-                else:
-                    kurt_val = 0.0
+                if sil_sample > best_silhouette:
+                    best_silhouette = sil_sample
+                    best_k = k
             except:
-                skew_val = 0.0
-                kurt_val = 0.0
+                continue
 
-        features = {
-            "n_non_zero": n_non_zero,
-            "skewness": skew_val,
-            "kurtosis": kurt_val,
-            "mean": mean_gss,
-            "median": median_gss,
-            "top5p": top5p_gss,
-            "has_high_tail": (top5p_gss / median_gss) > 1.3 if median_gss > 0 else False
+    print(f"选择最优聚类数: {best_k}, 轮廓系数: {best_silhouette:.3f}")
+
+    # 最终聚类
+    kmeans = MiniBatchKMeans(n_clusters=best_k, random_state=42, batch_size=1000, n_init=5)
+    cluster_labels = kmeans.fit_predict(features_scaled)
+
+    # 4. 分布类型标注
+    cluster_features = feature_matrix.groupby(cluster_labels).mean()
+    distribution_types = distribution_labeling(cluster_features)
+
+    # 5. 批量基因筛选
+    print("步骤3: 批量筛选高GSS基因...")
+
+    # 预计算所有spot的阈值
+    thresholds = precompute_thresholds_batch(gss_matrix, cluster_labels, distribution_types)
+
+    spot_genes_dict = {}
+    spot_metadata = {}
+    gene_names = mk_score_df.index.tolist()
+
+    for i, spot_name in enumerate(valid_spots):
+        cluster_id = cluster_labels[i]
+        dist_type = distribution_types.get(cluster_id, 'complex')
+
+        # 使用预计算的阈值
+        threshold = thresholds[i]
+        high_genes_indices = np.where(gss_matrix[i] > threshold)[0]
+        high_genes = [gene_names[idx] for idx in high_genes_indices]
+
+        spot_genes_dict[spot_name] = high_genes
+        spot_metadata[spot_name] = {
+            'cluster': cluster_id,
+            'distribution_type': dist_type,
+            'n_high_genes': len(high_genes)
         }
 
-        # 2. KDE峰值检测（仅当非零值足够多时）
-        if n_non_zero >= 100:  # 数据量太少时不检测峰值（避免噪声）
-            kde = gaussian_kde(non_zero_gss)
-            x = np.linspace(non_zero_gss.min(), non_zero_gss.max(), 1000, dtype=np.float64)
-            y = kde(x)
-            y_norm = y / y.max()  # 归一化到0-1（方便统一峰值高度阈值）
-            peaks, peak_info = find_peaks(y_norm, height=min_peak_height)
-            features["n_peaks"] = len(peaks)
-            features["kde_x"] = x  # 保存KDE曲线x轴（用于可视化）
-            features["kde_y"] = y  # 保存KDE曲线y轴
-            features["peaks_x"] = x[peaks] if len(peaks) > 0 else []  # 峰值对应的GSS值
-        else:
-            features["n_peaks"] = 0
-            features["kde_x"] = None
-            features["kde_y"] = None
-            features["peaks_x"] = []
+    # 统计各类分布的数量
+    dist_type_counts = {}
+    for metadata in spot_metadata.values():
+        dist_type = metadata['distribution_type']
+        dist_type_counts[dist_type] = dist_type_counts.get(dist_type, 0) + 1
 
-    # 3. 可视化分布（若开启）
+    cluster_analysis = {
+        'cluster_labels': cluster_labels,
+        'distribution_types': distribution_types,
+        'n_clusters': len(set(cluster_labels)),
+        'distribution_type_counts': dist_type_counts,
+        'scaler': scaler,
+        'kmeans': kmeans
+    }
+
+    # 返回结果
+    results = {
+        'spot_genes_dict': spot_genes_dict,
+        'spot_metadata': spot_metadata,
+        'cluster_analysis': cluster_analysis,
+        'feature_matrix': feature_matrix
+    }
+
+    # 可视化
+    visualize_results(
+        results=results,
+        mk_score_df=mk_score_df,
+        thresholds = thresholds,
+        top_n_spots=6,  # 每种分布类型展示6个spot
+        output_dir=output_dir
+    )
+
+    print("分析完成!")
+    return results
+
+
+def visualize_results(results, mk_score_df, thresholds, top_n_spots=6, output_dir=None):
+    """
+    展示results中的详细信息并可视化
+    参数:
+    - results: run_gss_analysis的输出结果字典
+    - mk_score_df: 包含GSS值的DataFrame（行为基因，列为spot）
+    - thresholds: 预计算好的各个spot阈值
+    - top_n_spots: 每种分布类型展示的spot数量
+    - output_dir: 图像和日志保存目录（None则不保存）
+    """
+    sns.set_style("whitegrid")
+
+    # 确定日志文件路径
+    log_path = output_dir + "_results_summary.txt"
+
+    # 用于存储日志内容的列表
+    log_content = []
+
+    # --------------------------
+    # 1. 收集results信息摘要
+    # --------------------------
+    log_content.append("=" * 50)
+    log_content.append("results信息摘要")
+    log_content.append("=" * 50)
+
+    # 1.1 聚类和分布类型统计
+    cluster_analysis = results['cluster_analysis']
+    dist_type_counts = cluster_analysis['distribution_type_counts']
+    n_clusters = cluster_analysis['n_clusters']
+    total_spots = len(results['spot_metadata'])
+
+    log_content.append(f"总spot数量: {total_spots}")
+    log_content.append(f"聚类数量: {n_clusters}")
+    log_content.append("\n分布类型统计:")
+
+    dist_df = pd.DataFrame(list(dist_type_counts.items()), columns=['分布类型', 'spot数量'])
+    dist_df['占比'] = dist_df['spot数量'] / total_spots * 100
+    dist_df = dist_df.sort_values('spot数量', ascending=False)
+    log_content.append(dist_df.to_string(index=False))  # 添加数据框内容
+
+    # 1.2 高GSS基因数量统计
+    spot_genes = results['spot_genes_dict']
+    gene_counts = [len(genes) for genes in spot_genes.values()]
+    log_content.append(f"\n单个spot的高GSS基因数量分布:")
+    log_content.append(f"  均值: {np.mean(gene_counts):.1f}")
+    log_content.append(f"  中位数: {np.median(gene_counts)}")
+    log_content.append(f"  范围: [{np.min(gene_counts)}, {np.max(gene_counts)}]")
+
+    # --------------------------
+    # 2. 收集可视化过程信息
+    # --------------------------
+    log_content.append("\n" + "=" * 50)
+    log_content.append("可视化GSS值分布")
+    log_content.append("=" * 50)
+
+    # 按分布类型分组spot
+    dist_to_spots = {}
+    for spot_name, meta in results['spot_metadata'].items():
+        dist_type = meta['distribution_type']
+        if dist_type not in dist_to_spots:
+            dist_to_spots[dist_type] = []
+        dist_to_spots[dist_type].append(spot_name)
+
+    # 获取spot名称列表
+    spots_names = list(results['spot_metadata'].keys())
+
+    # 为每种分布类型绘制代表性spot的GSS分布
+    for dist_type, spots in dist_to_spots.items():
+        selected_spots = spots[:top_n_spots]
+        if not selected_spots:
+            continue
+
+        log_content.append(f"\n分布类型: {dist_type}（展示{len(selected_spots)}/{len(spots)}个spot）")
+
+        # 创建子图
+        ncols = min(3, len(selected_spots))
+        nrows = (len(selected_spots) + ncols - 1) // ncols
+        fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 4 * nrows))
+        axes = axes.flatten() if nrows * ncols > 1 else [axes]
+
+        for i, spot_name in enumerate(selected_spots):
+            ax = axes[i]
+            gss_values = mk_score_df[spot_name].values
+
+            # 使用预计算筛选阈值
+            spot_index = spots_names.index(spot_name)
+            threshold = thresholds[spot_index]
+
+            # 绘制直方图
+            sns.histplot(gss_values, bins=30, kde=True, ax=ax, color='#66b3ff', edgecolor='black')
+            if threshold is not None:
+                ax.axvline(x=threshold, color='red', linestyle='--',
+                           label=f'screening threshold: {threshold:.2f}')
+            n_high_genes = len(results['spot_genes_dict'][spot_name])
+            ax.set_title(f"spot: {spot_name}\nnumber of high GSS genes: {n_high_genes}", fontsize=10)
+            ax.set_xlabel("Gss")
+            ax.set_ylabel("Genes")
+            ax.legend(fontsize=8)
+
+        plt.tight_layout()
+
+        # 保存图像
+        if output_dir:
+            save_path = f"{output_dir}_gss_distribution_{dist_type}.png"
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            log_content.append(f"已保存图像: {save_path}")  # 将保存路径写入日志
+        plt.close()
+
+    # --------------------------
+    # 3. 保存日志到文件
+    # --------------------------
+    if log_path:
+        with open(log_path, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(log_content))  # 用换行符连接所有日志内容
+        print(f"结果信息已保存至: {log_path}")  # 仅提示日志保存路径到控制台
+
+
+def calculate_adaptive_threshold(gene_counts, visualize=True, output_dir=None):
+    """
+    基于累积分布手动识别拐点计算阈值，同时可视化基因出现次数的直方图分布和累积分布
+    """
+    counts = np.array(list(gene_counts.values()))
+    sorted_counts = np.sort(counts)[::-1]
+    cumulative = np.cumsum(sorted_counts) / np.sum(sorted_counts)
+    x = np.arange(len(sorted_counts))
+
+    target_ratio = 0.5
+    knee_idx = np.argmax(cumulative >= target_ratio)
+
+    if knee_idx < len(sorted_counts):
+        threshold = sorted_counts[knee_idx]
+    else:
+        threshold = np.median(counts)
+
     if visualize:
-        # 绘制子图：1行2列（直方图+KDE曲线 + 统计指标标注）
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
 
-        # 子图1：直方图+KDE曲线+峰值标记
-        if n_non_zero > 0:
-            # 直方图（展示原始数据分布）
-            ax1.hist(non_zero_gss, bins=min(20, n_non_zero // 2), edgecolor="black", alpha=0.6, label="GSS值直方图")
-            # KDE曲线（平滑分布）
-            if features["kde_x"] is not None:
-                ax1.plot(features["kde_x"], features["kde_y"], color="red", linewidth=2, label="KDE分布曲线")
-                # 标记峰值
-                if len(features["peaks_x"]) > 0:
-                    for peak_x in features["peaks_x"]:
-                        ax1.axvline(x=peak_x, color="orange", linestyle="--", linewidth=1.5,
-                                    label="峰值" if peak_x == features["peaks_x"][0] else "")
-            # 标注均值和中位数
-            ax1.axvline(x=features["mean"], color="blue", linestyle="-", linewidth=1.5,
-                        label=f"均值: {features['mean']:.3f}")
-            ax1.axvline(x=features["median"], color="green", linestyle="-", linewidth=1.5,
-                        label=f"中位数: {features['median']:.3f}")
-
-        ax1.set_xlabel("GSS值")
-        ax1.set_ylabel("频数/密度")
-        ax1.set_title(f"GSS值分布（非零值数量: {n_non_zero}）")
-        ax1.legend(fontsize=8)
+        ax1.hist(counts, bins=30, edgecolor='black', color='#66b3ff')
+        ax1.axvline(x=threshold, color='red', linestyle='--',
+                    label=f'screening threshold: {threshold:.1f}')
+        ax1.set_title('occurrence number of genes histogram')
+        ax1.set_xlabel('occurrence number of genes')
+        ax1.set_ylabel('number of genes')
+        ax1.legend()
         ax1.grid(alpha=0.3)
 
-        # 子图2：关键分布特征文本标注（方便快速判断）
-        text_content = [
-            f"非零GSS值数量: {features['n_non_zero']}",
-            f"偏度 (Skewness): {features['skewness']:.3f}",
-            f"峰度 (Kurtosis): {features['kurtosis']:.3f}",
-            f"峰值数量: {features['n_peaks']}",
-            f"有高值尾部: {'是' if features['has_high_tail'] else '否'}",
-            f"前0.5%高值阈值: {features['top5p']:.3f}"
-        ]
-        # 文本分行显示
-        ax2.text(0.1, 0.9, "\n".join(text_content), transform=ax2.transAxes,
-                 fontsize=10, verticalalignment="top",
-                 bbox=dict(boxstyle="round", facecolor="lightgray", alpha=0.5))
-        ax2.set_xlim(0, 1)
-        ax2.set_ylim(0, 1)
-        ax2.axis("off")  # 隐藏坐标轴
-        ax2.set_title("分布特征指标")
+        ax2.plot(x, cumulative, 'b-', linewidth=2)
+        ax2.axvline(x=knee_idx, color='red', linestyle='--',
+                    label=f'inflection point: {knee_idx}')
+        ax2.axhline(y=cumulative[knee_idx], color='green', linestyle='--')
+        ax2.set_title(f'cumulative distribution(goal proportion {target_ratio * 100:.0f}%)')
+        ax2.set_xlabel('number of genes(descending)')
+        ax2.set_ylabel('cumulative proportion')
+        ax2.legend()
+        ax2.grid(alpha=0.3)
 
-        # 展示图像
         plt.tight_layout()
-        plt.show()
 
-    return features
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+            plt.savefig(f'{output_dir}_gene_counts_distribution.png', dpi=300, bbox_inches='tight')
+            print(f"分布图已保存至: {output_dir}_gene_counts_distribution.png")
+        plt.close()
 
-
-def select_best_method(features):
-    """
-    根据分布特征选择最合适的筛选方法
-    返回方法名称及对应的参数
-    """
-    # 规则1：非零值太少 → 直接用Top-N（最稳健）
-    if features["n_non_zero"] < 100:
-        return "topn", {"top_n": min(10, features["n_non_zero"])}  # 非零值少，只取前n
-
-    # 规则2：有明显多峰（≥2个峰值）→ KDE法（适合区分多簇分布）
-    elif features["n_peaks"] >= 2:
-        return "kde", {}  # KDE法默认参数
-
-    # 规则3：高度偏态（偏度>2）且有高值尾部 → Top-N法（适合长尾分布）
-    elif features["skewness"] > 2 and features["has_high_tail"]:
-        # 偏度越大，取的N越小（避免纳入太多低质量基因）
-        topn = 20 if features["skewness"] < 4 else 10
-        return "topn", {"top_n": topn}
-
-    # 规则4：近似正态分布（偏度<1.0）→ 均值+标准差法（适合对称分布）
-    elif abs(features["skewness"]) < 1.0:
-        # 峰度越高（峰值越尖），倍数"multiplier"越低（避免漏筛）
-        return "std", {"use_median":False}
-
-    # 规则5：其他情况（如单峰、中等偏态）→ 中位数+四分位距法（抗极端值，适合中等偏态）
-    else:
-        return "iqr", {"use_median":True}
-
-
-def dynamic_select_high_specific_genes(mk_score_df, adata):
-    """
-    动态为每个细胞选择最佳筛选方法，返回高特异性基因
-    """
-    high_specific_genes_per_cell = {}
-
-    for cell in adata.obs_names:
-        gss_values = mk_score_df[cell]
-        # 1. 计算当前细胞GSS值的分布特征
-        features = get_distribution_features(gss_values, visualize=False)
-
-        # 2. 根据特征选择最佳方法
-        method_name, params = select_best_method(features)
-        # print(method_name)
-
-        # 3. 调用对应方法筛选基因
-        if method_name == "kde":
-            genes = get_high_specificity_genes_kde_single_cell(gss_values)
-        elif method_name == "iqr":
-            genes = get_high_specificity_genes_nd_single_cell(gss_values, **params)
-        elif method_name == "std":
-            genes = get_high_specificity_genes_nd_single_cell(gss_values, **params)
-        elif method_name == "topn":
-            genes = get_high_specificity_genes_top_n_single_cell(gss_values, **params)
-        else:
-            genes = []  # 无匹配方法时返回空
-
-        high_specific_genes_per_cell[cell] = genes
-        # 可选：打印日志，查看每个细胞选择的方法
-        # print(f"细胞 {cell} 选择方法: {method_name}, 特征: {features}")
-
-    return high_specific_genes_per_cell
+    return threshold
 
 
 def calculate_gene_func(adata, gene_counts,
                         output_dir=None,
-                        spatial_top_pct=5,
-                        spatial_threshold=0.6,
-                        cluster_threshold=0.7
-                        ):
-    # 获取筛选的阈值
+                        score_threshold=0.5):
+    """基因功能计算"""
     adaptive_threshold = calculate_adaptive_threshold(gene_counts=gene_counts,
                                                       visualize=True,
                                                       output_dir=output_dir)
@@ -324,83 +666,20 @@ def calculate_gene_func(adata, gene_counts,
     filtered_genes_len = len([key for key, value in gene_counts.items() if value >= adaptive_threshold])
     print(f"占据50%的度的频率阈值是{adaptive_threshold},有{filtered_genes_len}个基因通过筛选（仅供展示）！！！")
 
-    # 初始化选择器
     selector = GssGeneCalculator(
         adata=adata,
         gene_counts=gene_counts,
-        spatial_top_pct=spatial_top_pct,  # 定义 “高表达细胞” 的百分比阈值
-        spatial_threshold=spatial_threshold,  # 判断 “空间范围受限” 的高表达占比阈值
-        cluster_threshold=cluster_threshold  # 判断 “聚集分布” 的聚集指数阈值
+        #score_threshold=score_threshold
     )
 
-    # 筛选具有特定空间表达模式的基因
     selected_genes, results = selector.run_pipeline()
-
-    # 保存筛选结果
-    results.to_csv(output_dir + "_selected_genes.csv", index=False, sep='\t')
+    if(len(selected_genes) > 0):
+        results.to_csv(output_dir + "_selected_genes.csv", index=False, sep='\t')
+    else:
+        results.to_csv(output_dir + "_processing_log.csv")
     print(f"验证结果已保存至 {output_dir}")
 
     return selected_genes, results
-
-
-def calculate_adaptive_threshold(gene_counts, visualize=True, output_dir=None):
-    """
-    基于累积分布手动识别拐点计算阈值，同时可视化基因出现次数的直方图分布和累积分布
-    参数:
-    - gene_counts: 基因出现次数的字典 {gene: count}
-    - visualize: 是否可视化分布（默认True）
-    - output_dir: 图像保存目录
-    返回:
-    - threshold: 计算得到的筛选阈值
-    """
-    counts = np.array(list(gene_counts.values()))
-    sorted_counts = np.sort(counts)[::-1]  # 对次数降序排列
-    cumulative = np.cumsum(sorted_counts) / np.sum(sorted_counts)  # 计算累积占比
-    x = np.arange(len(sorted_counts))  # 构建基因数量（降序）的横轴
-
-    # 手动识别拐点：找累积占比达到 50% 的位置
-    target_ratio = 0.5
-    knee_idx = np.argmax(cumulative >= target_ratio)  # 找到首个满足累积占比条件的索引
-
-    # 确定阈值
-    if knee_idx < len(sorted_counts):
-        threshold = sorted_counts[knee_idx]
-    else:
-        threshold = np.median(counts)  # 若未找到，用中位数兜底
-
-    # 可视化验证（同时展示直方图和累积分布）
-    if visualize:
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))  # 1行2列子图
-
-        # 子图1：gene_counts 直方图分布
-        ax1.hist(counts, bins=30, edgecolor='black', color='#66b3ff')
-        ax1.axvline(x=threshold, color='red', linestyle='--',
-                    label=f'筛选阈值: {threshold:.1f}')  # 标注阈值竖线
-        ax1.set_title('基因出现次数直方图分布')
-        ax1.set_xlabel('基因出现次数')
-        ax1.set_ylabel('基因数量')
-        ax1.legend()
-        ax1.grid(alpha=0.3)
-
-        # 子图2：累积分布曲线
-        ax2.plot(x, cumulative, 'b-', linewidth=2)
-        ax2.axvline(x=knee_idx, color='red', linestyle='--',
-                    label=f'拐点位置: {knee_idx}')  # 标注拐点竖线
-        ax2.axhline(y=cumulative[knee_idx], color='green', linestyle='--')
-        ax2.set_title(f'基因出现次数累积分布（目标占比 {target_ratio*100:.0f}%）')
-        ax2.set_xlabel('基因数量（按出现次数降序排列）')
-        ax2.set_ylabel('累积占比')
-        ax2.legend()
-        ax2.grid(alpha=0.3)
-
-        plt.tight_layout()  # 调整子图间距
-
-        os.makedirs(output_dir, exist_ok=True)
-        plt.savefig(f'{output_dir}gene_counts_distribution.png', dpi=300, bbox_inches='tight')
-        print(f"分布图已保存至: {output_dir}gene_counts_distribution.png")
-
-
-    return threshold
 
 
 def plot_gene_spatial(mk_score_df, adata, gene_name, high_specificity_genes_per_cell,
@@ -474,13 +753,13 @@ def plot_gene_spatial(mk_score_df, adata, gene_name, high_specificity_genes_per_
             # alpha=alpha,
             alpha_img=background_alpha,
             img_key='downscaled_fullres',  # 'hires'
-            title=f'{gene_name}空间表达分布({visual_indicators})',
+            title=f'{gene_name}({visual_indicators})',
             return_fig=True,
             frameon=True,
             show=show,
         )
 
-        fig.savefig(os.path.join(output_dir, f"_{color}_calibrated.png"), dpi=400)
+        fig.savefig(os.path.join(output_dir, f"{color}_calibrated.png"), dpi=400)
         plt.close(fig)
 
     except Exception as e:
@@ -528,35 +807,25 @@ def analyze_single_sample(output_dir, feather_path, h5ad_path):
     mk_score_df, adata = read_data(feather_path, h5ad_path)
 
     # 2. 计算样本各个spot的高GSS基因
-    high_specificity_genes_per_cell = dynamic_select_high_specific_genes(mk_score_df, adata)
-    gene_nums = {
-        cell_type: len(genes)
-        for cell_type, genes in high_specificity_genes_per_cell.items()
-    }
+    results = run_gss_analysis(mk_score_df, adata, output_dir)
 
-    # 3. 获取高特异性基因
-    all_high_specificity_genes = set()
-    for genes in high_specificity_genes_per_cell.values():
-        all_high_specificity_genes.update(genes)
-    all_high_specificity_genes = list(all_high_specificity_genes)
-
-    # 4. 统计各基因在列表中的频率
-    gene_counts = {gene: 0 for gene in all_high_specificity_genes}
+    # 3. 获取高特异性基因并统计频率
+    high_specificity_genes_per_cell = results['spot_genes_dict']  # spot -> 基因列表的字典
+    gene_counts = {}
     for genes in high_specificity_genes_per_cell.values():
         for gene in genes:
-            gene_counts[gene] += 1
+            # 若基因已在字典中，计数+1；否则初始化为1
+            gene_counts[gene] = gene_counts.get(gene, 0) + 1
 
-    # 5. 基因筛选
+    # 4. 基因筛选
     selected_genes, _ = calculate_gene_func(
         adata, gene_counts,
         output_dir=output_dir,
-        spatial_top_pct=5,  # 定义 “高表达细胞” 的百分比阈值
-        spatial_threshold=0.6,  # 判断 “离散度受限” 的离散阈值
-        cluster_threshold=0.6  # 判断 “聚集分布” 的聚集指数阈值
+        score_threshold=0.40,  # 判断 “特异性” 的阈值
     )
     print(selected_genes)
 
-    # 6. 可视化空间表达模式
+    # 5. 可视化空间表达模式
     plot_multiple_genes(
         mk_score_df, adata, selected_genes,
         high_specificity_genes_per_cell,
@@ -584,6 +853,8 @@ def batch_analysis(select_n, json_path, data_dir, output_root):
     n = 5  # 每种癌症选取的样本数
     method = 'calculateTopGSS'
     species = "Homo sapiens"
+    selected_cancers = ['COAD', 'COADREAD', 'EPM', 'GBM', 'HCC', 'HGSOC', 'IDC',
+                        'ILC', 'LUAD', 'PAAD', 'PRAD', 'READ', 'SCCRCC', 'SKCM']
     species_data = data.get(species, {})
     cancer_types = species_data.get("cancer_types", {})
 
@@ -591,10 +862,10 @@ def batch_analysis(select_n, json_path, data_dir, output_root):
     i = 1
     for cancer_type, sample_ids in cancer_types.items():
         # 4. 遍历该癌症类型下的每个样本
-        ids_to_query = sample_ids[: min(n, len(sample_ids))]
+        ids_to_query = sample_ids[:] # min(n, len(sample_ids))
         for id in ids_to_query:
             # 构建文件路径
-            if i <= select_n:
+            if i <= select_n and len(ids_to_query) > 1 and cancer_type in selected_cancers:
                 output_dir = os.path.join(output_root, species, cancer_type, id, method)
                 feather_path = os.path.join(data_dir, species, cancer_type, id,
                                             f"latent_to_gene/{id}_gene_marker_score.feather")
@@ -613,19 +884,20 @@ def batch_analysis(select_n, json_path, data_dir, output_root):
 
 
 if __name__ == "__main__":
+
     # 命令行参数
     parser = argparse.ArgumentParser(description="批量计算样本的Top GSS基因")
     parser.add_argument("--select-n", type=str,
-                        default=29,
+                        default=9999,
                         help="至多分析样本")
     parser.add_argument("--json", type=str,
-                        default="/Users/wuyang/Documents/MyPaper/3/dataset/cancer_samples.json",
+                        default="/home/wuyang/hest-data/cancer_samples.json",
                         help="样本映射JSON路径")
     parser.add_argument("--data-dir", type=str,
-                        default="/Users/wuyang/Documents/MyPaper/3/dataset/HEST-data/",
+                        default="/home/wuyang/hest-data/process/",
                         help="数据根目录")
     parser.add_argument("--output-root", type=str,
-                        default="/Users/wuyang/Documents/MyPaper/3/gsVis/output/HEST",
+                        default="../output/HEST",
                         help="结果输出根目录")
 
     # 解析命令行参数
