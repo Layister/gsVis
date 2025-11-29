@@ -1,0 +1,80 @@
+flowchart TD
+    subgraph S0 [多模态数据整合]
+        A0[多癌种空间转录组数据<br>10x Visium, Stereo-seq]
+        A1[匹配的单细胞RNA-seq参考图谱<br>HCA, Tabula Sapiens]
+        A2[公共数据库与知识库<br>TCGA, MSigDB, CellMarker]
+    end
+
+    A0 --> B1
+    A0 --> B2
+
+    subgraph S1 [标准化与特征工程]
+        B1[空间数据QC与标准化<br>Scanpy, 批次校正]
+        B2[空间图构建<br>空间坐标, kNN, 邻接矩阵]
+        B3[scRNA-seq整合<br>细胞类型注释, 特征基因集]
+    end
+
+    A1 --> B3
+    A2 --> B3
+
+    B1 --> C1
+    B2 --> C1
+    B3 --> C2
+
+    subgraph S2 [空间感知的深度学习模型]
+        subgraph S2_1 [图表示学习]
+            C1[图注意力网络GAT<br>多头注意力机制, 非线性嵌入]
+        end
+
+        C1 --> C2{基因特异性评分GSS<br>动态邻域, 非参数秩检验}
+
+        subgraph S2_2 [层级空间聚类]
+            C3[微域识别<br>GSS谱 + 空间约束 Leiden]
+            C4[宏域聚合<br>微域关联图, Louvain优化]
+        end
+    end
+
+    C2 --> C3
+    C2 --> C5
+    C3 --> C4
+
+    subgraph S3 [细胞溯源与功能注释]
+        C5[细胞类型解卷积<br>Cell2Location, Tangram, ssGSEA]
+        C6[空间功能注释<br>GO, KEGG, Reactome 富集分析]
+        C7[细胞通讯推断<br>CellChat, 配体-受体对分析]
+    end
+
+    B3 --> C5
+    C3 --> C6
+    C4 --> C6
+    C5 --> C7
+
+    subgraph S4 [跨癌种整合与发现]
+        D1[保守性空间模块识别<br>Jaccard指数, Fisher精确检验]
+        D2[癌种特异性模式分析<br>差异表达GSS, 空间组织规律]
+        D3[调控网络构建<br>WGCNA, 关键驱动基因]
+    end
+
+    C6 --> D1
+    C6 --> D2
+    C7 --> D2
+    D1 & D2 --> D3
+
+    subgraph S5 [知识发现与benchmark]
+        E1[算法与软件包<br>PyTorch Geometric, 可复用流程]
+        E2[多癌种空间图谱集<br>微域/宏域注释, 特征基因]
+        E3[生物学机制假说<br>如“免疫代谢共生微域”]
+        E4[性能基准测试<br>vs. SPARK, SpaGCN, PROST]
+    end
+
+    D3 --> E3
+    S2 --> E1
+    S3 --> E2
+    S2 & S3 --> E4
+
+    style S0 fill:#e8f5e8,stroke:#2e7d32,stroke-width:2px
+    style S1 fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
+    style S2 fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px
+    style S3 fill:#fff3e0,stroke:#ef6c00,stroke-width:2px
+    style S4 fill:#ffebee,stroke:#c62828,stroke-width:2px
+    style S5 fill:#e0f2f1,stroke:#00695c,stroke-width:2px

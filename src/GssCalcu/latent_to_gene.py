@@ -164,23 +164,8 @@ def run_latent_to_gene(config: LatentToGeneConfig):
     coor_latent = coor_latent.astype(np.float32)
     logger.info("Latent representation extracted.")
 
-    # Geometric mean across slices
-    gM = None
-    frac_whole = None
-    if config.gM_slices is not None:
-        logger.info("Geometrical mean across multiple slices is provided.")
-        gM_df = pd.read_parquet(config.gM_slices)
 
-        common_genes = np.intersect1d(adata.var_names, gM_df.index)
-        gM_df = gM_df.loc[common_genes]
-        gM = gM_df["G_Mean"].values
-        frac_whole = gM_df["frac"].values
-        adata = adata[:, common_genes]
-        logger.info(
-            f"{len(common_genes)} common genes retained after loading the cross slice geometric mean."
-        )
-
-    # Compute ranks after taking common genes with gM_slices
+    # Compute ranks
     logger.info("------Ranking the spatial data...")
     if not scipy.sparse.issparse(adata.X):
         adata_X = scipy.sparse.csr_matrix(adata.X)
@@ -205,27 +190,33 @@ def run_latent_to_gene(config: LatentToGeneConfig):
             data = adata_X[i, :].toarray().flatten()
             ranks[i, :] = rankdata(data, method="average")
 
-    if gM is None:
-        gM = gmean(ranks, axis=0)
-        gM = gM.astype(np.float16)
+
+    gM = gmean(ranks, axis=0)
+    gM = gM.astype(np.float16)
 
     adata_X_bool = adata_X.astype(bool)
-    if frac_whole is None:
-        # Compute the fraction of each gene across cells
-        frac_whole = np.asarray(adata_X_bool.sum(axis=0)).flatten() / n_cells
-        logger.info("Gene expression proportion of each gene across cells computed.")
-    else:
-        logger.info(
-            "Gene expression proportion of each gene across cells in all sections has been provided."
-        )
+    # Compute the fraction of each gene across cells
+    frac_whole = np.asarray(adata_X_bool.sum(axis=0)).flatten() / n_cells
+    logger.info("Gene expression proportion of each gene across cells computed.")
 
     frac_whole += 1e-12  # Avoid division by zero
     # Normalize the ranks
     ranks /= gM
 
     logger.info("------Computing marker scores...")
+    neighborhoods = {}
     mk_score = np.zeros((n_cells, n_genes), dtype=np.float16)
+
     for cell_pos in trange(n_cells, desc="Calculating marker scores"):
+        cell_select_pos = find_neighbors_regional(
+            cell_pos,
+            spatial_net_dict,
+            coor_latent,
+            config,
+            cell_annotations,
+        )
+        neighborhoods[cell_pos] = cell_select_pos.tolist()
+
         mk_score[cell_pos, :] = compute_regional_mkscore(
             cell_pos,
             spatial_net_dict,
@@ -237,6 +228,13 @@ def run_latent_to_gene(config: LatentToGeneConfig):
             adata_X_bool,
             pearson_residuals,
         )
+
+    #adata.uns["regional_neighbors"] = {str(k): v for k, v in neighborhoods.items()}
+    spot_names = adata.obs_names
+    adata.uns["regional_neighbors"] = {
+        spot_names[k]: [spot_names[i] for i in v]
+        for k, v in neighborhoods.items()
+    }
 
     mk_score = mk_score.T
     logger.info("Marker scores computed.")
