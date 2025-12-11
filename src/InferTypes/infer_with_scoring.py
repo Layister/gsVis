@@ -34,8 +34,8 @@ MIN_MARKERS_PER_CT = 2
 
 CANCER_TO_ORGANS = {
     # 消化系统肿瘤
-    "COAD": ["GI_tract", "Liver"],  # 结肠癌：胃肠道 + 肝（常见转移部位）
-    "READ": ["GI_tract", "Liver"],  # 直肠癌：胃肠道 + 肝
+    "COAD": ["GI_tract"],  # 结肠癌：胃肠道
+    "READ": ["GI_tract"],  # 直肠癌：胃肠道
     "EPM": ["GI_tract"],  # 肠息肉：胃肠道
     "PAAD": ["Pancreas", "GI_tract", "Liver"],  # 胰腺癌：胰腺 + 胃肠道 + 肝
     "ESCC": ["GI_tract"],  # 食管鳞状细胞癌：胃肠道
@@ -642,19 +642,13 @@ def method_nonzero_stats(scores: Mapping[str, Mapping[str, float]]):
 # --------------------------------------------------------------------------- #
 
 def parse_args():
-    cancer_type = "COAD"
-    id = "TENX89"
+    cancer_type = "READ"
+    id = "ZEN49"
 
     adata_path = os.path.join("/home/wuyang/hest-data/process/Homo sapiens", cancer_type, f"{id}_adata.h5ad")
     markers_path = "./global_ref/global_markers.json"
     output_path = f"../../output/HEST/Homo sapiens/{cancer_type}/{id}/cell_types"
 
-
-    default_cancer_type = "COAD"
-    default_id = "TENX89"
-
-    data_root = "/home/wuyang/hest-data/process/Homo sapiens"
-    output_root = "../../output/HEST/Homo sapiens"
 
     parser = argparse.ArgumentParser(
         description="Compute AUCell, PAGE, ssGSEA scores and fused presence likelihoods with QC."

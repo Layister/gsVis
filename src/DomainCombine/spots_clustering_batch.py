@@ -126,11 +126,7 @@ def load_and_preprocess_data(json_path):
         gene_expr_list.append(expr_df)
 
         # 提取空间坐标
-        if "coordinates" in domain_data:
-            x, y = domain_data["coordinates"]
-        else:
-            # 随机生成坐标用于示例，实际使用时应替换为真实坐标
-            x, y = np.random.uniform(0, 100), np.random.uniform(0, 100)
+        x, y = domain_data["coordinates"]
         coords_list.append({"domain_id": did, "x": x, "y": y})
 
     # 合并数据
@@ -152,62 +148,102 @@ def filter_feature_genes(all_expr, raw_data=None):
     """基于差异倍数和统计显著性筛选特征基因（支持跳过检验）"""
     print("正在筛选特征基因...")
 
-    # 若配置跳过统计检验，直接使用预设基因或原始数据中的特征基因
     if Config.skip_statistical_test:
-        if len(Config.predefined_feature_genes) > 0:
-            # 使用用户指定的特征基因
-            feature_genes = Config.predefined_feature_genes
-            # 提取这些基因的统计信息（用于后续分析）
-            gene_stats = all_expr[all_expr["gene"].isin(feature_genes)].groupby("gene").agg(
-                mean_domain=("expr_domain", "mean"),
-                mean_global=("expr_global", "mean"),
-                fold_change=("fold_change", "mean")
-            ).reset_index()
-            gene_stats["p_val"] = 0.0  # 占位
-            gene_stats["fdr"] = 0.0  # 占位
+        # ---------- 不做统计检验，直接用预设或原始数据中的特征基因 ----------
+        if Config.predefined_feature_genes:
+            # 1) 使用指定的特征基因
+            feature_genes = list(Config.predefined_feature_genes)
         else:
-            # 从原始数据中提取每个微域的特征基因并取 union
+            # 2) 从原始数据中提取每个微域的特征基因并取 union
             domain_feature_genes = []
-            for did in raw_data:
-                domain_feature_genes.extend(raw_data[did].get("feature_genes", []))
+            if raw_data is not None:
+                for did, d_info in raw_data.items():
+                    domain_feature_genes.extend(d_info.get("feature_genes", []))
             feature_genes = list(set(domain_feature_genes))  # 去重
-            # 提取统计信息
-            gene_stats = all_expr[all_expr["gene"].isin(feature_genes)].groupby("gene").agg(
-                mean_domain=("expr_domain", "mean"),
-                mean_global=("expr_global", "mean"),
-                fold_change=("fold_change", "mean")
-            ).reset_index()
-            gene_stats["p_val"] = 0.0
-            gene_stats["fdr"] = 0.0
 
-        feature_genes = [g for g in feature_genes if g in all_expr["gene"].unique()]  # 过滤不存在的基因
-        gene_stats = gene_stats[gene_stats["gene"].isin(feature_genes)]
+        # 汇总统计信息（不做检验，只算均值 & fold_change 占位）
+        gene_stats = _summarize_gene_stats(all_expr, feature_genes)
+        # 最终的 feature_genes 与 gene_stats 保持一致
+        feature_genes = gene_stats["gene"].tolist()
+
     else:
-        # 原有逻辑：执行统计检验和筛选
-        def calculate_statistics(group):
-            control = group["expr_global"].values
-            treatment = group["expr_domain"].values
-            stat, p_val = mannwhitneyu(treatment, control, alternative='greater')
-            return pd.Series({
-                "p_val": p_val,
-                "mean_domain": np.mean(treatment),
-                "mean_global": np.mean(control)
-            })
+        # ---------- 执行统计检验和筛选 ----------
+        gene_stats = (
+            all_expr.groupby("gene")
+            .apply(_calculate_mwu_statistics)
+            .reset_index()
+        )
 
-        gene_stats = all_expr.groupby("gene").apply(calculate_statistics).reset_index()
+        # FDR 校正
         gene_stats["fdr"] = multipletests(gene_stats["p_val"], method="fdr_bh")[1]
+        # fold change: domain / global，加一个很小的数避免除零
         gene_stats["fold_change"] = gene_stats["mean_domain"] / gene_stats["mean_global"].replace(0, 1e-10)
+
         # 应用筛选条件
         gene_stats = gene_stats[
-            (gene_stats["fold_change"] >= Config.fc_threshold) &
-            (gene_stats["fdr"] < Config.fdr_threshold)
-            ].sort_values("fold_change", ascending=False)
+            (gene_stats["fold_change"] >= Config.fc_threshold)
+            & (gene_stats["fdr"] < Config.fdr_threshold)
+        ].sort_values("fold_change", ascending=False)
+
         feature_genes = gene_stats["gene"].tolist()
 
     # 保存结果
-    gene_stats.to_csv(os.path.join(Config.output_dir, "tables", "feature_genes.csv"), index=False)
+    out_path = os.path.join(Config.output_dir, "tables", "feature_genes.csv")
+    gene_stats.to_csv(out_path, index=False)
     print(f"特征基因筛选完成，共{len(feature_genes)}个基因符合条件")
+
     return feature_genes, gene_stats
+
+
+def _summarize_gene_stats(all_expr: pd.DataFrame, feature_genes):
+    """
+    对给定的基因列表，在 all_expr 上汇总平均表达与 fold change。
+    不做统计检验，只算 mean_domain / mean_global / fold_change。
+    """
+    if not feature_genes:
+        return pd.DataFrame(columns=["gene", "mean_domain", "mean_global", "fold_change", "p_val", "fdr"])
+
+    feature_genes = list(set(feature_genes))  # 去重
+    # 只保留在 all_expr 里存在的基因
+    valid_genes = set(all_expr["gene"].unique())
+    feature_genes = [g for g in feature_genes if g in valid_genes]
+
+    if not feature_genes:
+        return pd.DataFrame(columns=["gene", "mean_domain", "mean_global", "fold_change", "p_val", "fdr"])
+
+    gene_stats = (
+        all_expr[all_expr["gene"].isin(feature_genes)]
+        .groupby("gene")
+        .agg(
+            mean_domain=("expr_domain", "mean"),
+            mean_global=("expr_global", "mean"),
+            fold_change=("fold_change", "mean"),
+        )
+        .reset_index()
+    )
+
+    # 占位列：与统计检验分支保持同样的列名
+    gene_stats["p_val"] = 0.0
+    gene_stats["fdr"] = 0.0
+
+    return gene_stats
+
+
+def _calculate_mwu_statistics(group: pd.DataFrame) -> pd.Series:
+    """
+    对单个基因的表达数据执行 Mann-Whitney U 检验（treatment: expr_domain, control: expr_global）
+    """
+    control = group["expr_global"].values
+    treatment = group["expr_domain"].values
+    stat, p_val = mannwhitneyu(treatment, control, alternative="greater")
+    return pd.Series(
+        {
+            "p_val": p_val,
+            "mean_domain": float(np.mean(treatment)),
+            "mean_global": float(np.mean(control)),
+        }
+    )
+
 
 
 # --------------------------
@@ -1021,8 +1057,11 @@ def output_cluster_details(cluster_results, domain_gene_sets, raw_data, output_d
     """
     print("正在生成聚类详细信息...")
 
-    # 读取聚类统计信息
-    stats_path = os.path.join(output_dir, "tables", "community_detection_statistics.json")
+    tables_dir = os.path.join(output_dir, "tables")
+    os.makedirs(tables_dir, exist_ok=True)
+
+    # ========= 1. 读取聚类统计信息 =========
+    stats_path = os.path.join(tables_dir, "community_detection_statistics.json")
     if not os.path.exists(stats_path):
         print("警告: 聚类统计文件不存在，跳过详细报告生成")
         return pd.DataFrame()
@@ -1031,227 +1070,183 @@ def output_cluster_details(cluster_results, domain_gene_sets, raw_data, output_d
         stats = json.load(f)
 
     cluster_biology = stats.get("cluster_biology", [])
-
-    if len(cluster_biology) == 0:
-        print("没有找到任何聚类，跳过详细报告生成")
+    if not cluster_biology:
+        print("警告: cluster_biology 为空，跳过详细报告生成")
         return pd.DataFrame()
 
-    cluster_biology = run_cluster_enrichment(cluster_biology, output_dir)
+    # ========= 2. 统一 cluster_results 为 DataFrame，并构建 cluster_id -> domains 映射 =========
+    if isinstance(cluster_results, pd.DataFrame):
+        cluster_df = cluster_results.copy()
+    else:
+        # 支持 list[dict] / 其它可转 DataFrame 的结构
+        cluster_df = pd.DataFrame(cluster_results)
 
-    # 创建详细的聚类报告
+    if cluster_df.empty or not {"cluster", "domain_id"}.issubset(cluster_df.columns):
+        print("[output_cluster_details] cluster_results 缺少 'cluster' 或 'domain_id' 列，无法构建 domains 映射")
+        return pd.DataFrame()
+
+    # 只保留已聚类的微域（cluster != -1）
+    clustered_df = cluster_df[cluster_df["cluster"] != -1]
+    domains_by_cluster = (
+        clustered_df.groupby("cluster")["domain_id"].apply(list).to_dict()
+    )
+
+    # ========= 3. 构建详细报告 detailed_report =========
     detailed_report = []
 
     for cluster_info in cluster_biology:
-        cluster_id = cluster_info['cluster_id']
-        size = cluster_info['size']
-        gene_similarity = cluster_info['gene_similarity']
-        core_gene_count = cluster_info['core_gene_count']
-        total_gene_count = cluster_info['total_gene_count']
-        spot_count = cluster_info['spot_count']
-        spatial_compactness = cluster_info['spatial_compactness']
-        core_genes = cluster_info['core_genes']
+        cluster_id = cluster_info.get("cluster_id")
 
-        # ========== 处理富集信息 ==========
-        top_enriched_pathways = cluster_info.get('top_enriched_pathways', [])
-        top_pathways_str = cluster_info.get('top_pathways', '')  # 原有的字符串摘要
+        # ⭐ domains 优先来源于 cluster_results 的分组；若没有，则退回 stats 里的 domains
+        cluster_domains = domains_by_cluster.get(
+            cluster_id, cluster_info.get("domains", [])
+        )
 
-        if top_enriched_pathways:
-            # 生成人类可读的富集描述
-            top_terms = []
-            for pathway in top_enriched_pathways:
-                term_clean = pathway['term'].split(' (GO:')[0]  # 清理GO术语
-                top_terms.append(f"{term_clean} ({pathway['source']})")
-            enrichment_summary = "; ".join(top_terms)
+        size = cluster_info.get("size", len(cluster_domains))
+        gene_similarity = cluster_info.get("gene_similarity", 0.0)
+        spatial_compactness = cluster_info.get("spatial_compactness", 0.0)
+        core_genes = cluster_info.get("core_genes", [])
+        core_gene_count = cluster_info.get("core_gene_count", len(core_genes))
+        total_gene_count = cluster_info.get("total_gene_count", 0)
+        spot_count = cluster_info.get("spot_count", 0)
 
-            # 提取核心富集信息用于JSON
-            core_enrichment = [{
-                'term': pathway['term'],
-                'source': pathway['source'],
-                'adj_pvalue': pathway['adj_pvalue'],
-                'gene_count': pathway['overlap_count']
-            } for pathway in top_enriched_pathways]
-        else:
-            enrichment_summary = top_pathways_str if top_pathways_str else "无显著富集"
-            core_enrichment = []
-        # ========== 结束 ==========
+        # 计算每个聚类平均基因数（基于 domain_gene_sets）
+        gene_counts = []
+        for d in cluster_domains:
+            genes = domain_gene_sets.get(d, set())
+            gene_counts.append(len(genes))
+        avg_genes_per_domain = float(np.mean(gene_counts)) if gene_counts else 0.0
 
-        # 获取该聚类的所有微域
-        cluster_domains = cluster_info['domains']
-
-        # 计算每个微域的特征基因数量
-        domain_gene_counts = []
-        for domain in cluster_domains:
-            if domain in domain_gene_sets:
-                gene_count = len(domain_gene_sets[domain])
-                domain_gene_counts.append(gene_count)
-
-        avg_genes_per_domain = np.mean(domain_gene_counts) if domain_gene_counts else 0
-
-        # 判断聚类类型
-        if gene_similarity > 0.3 and spatial_compactness > 0.7:
+        # 聚类类型简单分类
+        if gene_similarity >= 0.3 and spatial_compactness >= 0.6:
             cluster_type = "High Quality Module"
-        elif gene_similarity > 0.2:
-            cluster_type = "Gene-Consistent Module"
-        elif spatial_compactness > 0.7:
-            cluster_type = "Spatially Compact Module"
+        elif gene_similarity >= 0.3:
+            cluster_type = "Gene-Consistent"
+        elif spatial_compactness >= 0.6:
+            cluster_type = "Spatially Compact"
         else:
-            cluster_type = "General Module"
+            cluster_type = "General"
 
-        # 生成聚类描述
-        if core_gene_count >= 10:
-            gene_description = f"富含{core_gene_count}个核心基因"
-        elif core_gene_count >= 5:
-            gene_description = f"具有{core_gene_count}个核心基因"
-        else:
-            gene_description = f"仅有{core_gene_count}个核心基因"
-
+        # 大小描述
         if size > 100:
             size_description = "大型聚类"
-        elif size > 30:
+        elif size >= 30:
             size_description = "中型聚类"
         else:
             size_description = "小型聚类"
 
+        # ========= 富集信息：直接使用 run_cluster_enrichment 写在 cluster_biology 里的结果 =========
+        top_enriched = cluster_info.get("top_enriched_pathways", [])
+        top_summary = cluster_info.get("top_pathways", "")
+
+        if top_enriched:
+            core_enrichment = []
+            for p in top_enriched[:]:
+                # 兼容一下可能的字段名
+                term = p.get("term") or p.get("Term", "")
+                source = p.get("source") or p.get("Source", "")
+                if "adj_pvalue" in p:
+                    adj_p = p.get("adj_pvalue")
+                else:
+                    adj_p = p.get("Adjusted P-value", np.nan)
+
+                gene_count = p.get("overlap_count")
+                core_enrichment.append(
+                    {
+                        "term": term,
+                        "source": source,
+                        "adj_pvalue": adj_p,
+                        "gene_count": gene_count,
+                    }
+                )
+
+            top_terms = [e["term"] for e in core_enrichment[:3] if e.get("term")]
+            enrichment_summary = "; ".join(top_terms) if top_terms else (top_summary or "Has enrichment hits")
+        else:
+            core_enrichment = []
+            enrichment_summary = top_summary or "No significant enrichment"
+
         detailed_report.append({
-            'cluster_id': cluster_id,
-            'size': size,
-            'gene_similarity': gene_similarity,
-            'core_gene_count': core_gene_count,
-            'total_gene_count': total_gene_count,
-            'spot_count': spot_count,
-            'avg_genes_per_domain': avg_genes_per_domain,
-            'spatial_compactness': spatial_compactness,
-            'spatial_range_x': cluster_info['spatial_range_x'],
-            'spatial_range_y': cluster_info['spatial_range_y'],
-            'spatial_center_x': cluster_info['spatial_center_x'],
-            'spatial_center_y': cluster_info['spatial_center_y'],
-            'cluster_type': cluster_type,
-            'core_genes': core_genes,
-            'enrichment_summary': enrichment_summary,  # 富集摘要
-            'description': f"{size_description}，{gene_description}，{cluster_type}",
-            'domains_sample': cluster_domains,
-            'core_enrichment': core_enrichment  # 核心富集信息
+            "cluster_id": cluster_id,
+            "size": size,
+            "cluster_type": cluster_type,
+            "size_description": size_description,
+            "gene_similarity": gene_similarity,
+            "core_gene_count": core_gene_count,
+            "total_gene_count": total_gene_count,
+            "spot_count": spot_count,
+            "avg_genes_per_domain": avg_genes_per_domain,
+            "spatial_compactness": spatial_compactness,
+            "spatial_range_x": cluster_info.get("spatial_range_x", 0.0),
+            "spatial_range_y": cluster_info.get("spatial_range_y", 0.0),
+            "spatial_center_x": cluster_info.get("spatial_center_x", 0.0),
+            "spatial_center_y": cluster_info.get("spatial_center_y", 0.0),
+            "core_genes": core_genes,
+            "core_enrichment": core_enrichment,
+            "enrichment_summary": enrichment_summary,
+            "domains_sample": cluster_domains,
         })
 
-    # 保存详细报告
-    detailed_df = pd.DataFrame(detailed_report)
-    detailed_df.to_csv(
-        os.path.join(output_dir, "tables", "cluster_detailed_report.csv"),
-        index=False
+    # ========= 4. 写出详细报告 CSV =========
+    detailed_df = (
+        pd.DataFrame(detailed_report)
+        .sort_values("cluster_id")
+        .reset_index(drop=True)
     )
+    detailed_path = os.path.join(tables_dir, "cluster_detailed_report.csv")
+    detailed_df.to_csv(detailed_path, index=False)
+    print(f"[output_cluster_details] 已写出聚类详细报告: {detailed_path}，聚类数 = {len(detailed_df)}")
 
-    # ========== 更新cluster_biology.csv ==========
-    cluster_biology_for_csv = []
-    for cluster in detailed_report:
-        cluster_biology_for_csv.append({
-            'cluster_id': cluster['cluster_id'],
-            'size': cluster['size'],
-            'gene_similarity': cluster['gene_similarity'],
-            'core_gene_count': cluster['core_gene_count'],
-            'total_gene_count': cluster['total_gene_count'],
-            'spot_count': cluster['spot_count'],
-            'spatial_compactness': cluster['spatial_compactness'],
-            'spatial_center_x': cluster['spatial_center_x'],
-            'spatial_center_y': cluster['spatial_center_y'],
-            'spatial_range_x': cluster['spatial_range_x'],
-            'spatial_range_y': cluster['spatial_range_y'],
-            'core_genes': ', '.join(cluster['core_genes']) if cluster['core_genes'] else '',  # 将列表转为字符串
-            'enrichment_summary': cluster['enrichment_summary'],  # 富集摘要
-            'cluster_type': cluster['cluster_type']  # 聚类类型
-        })
-
-    cluster_biology_df = pd.DataFrame(cluster_biology_for_csv)
-    cluster_biology_df.to_csv(
-        os.path.join(output_dir, "tables", "cluster_biology.csv"),
-        index=False
-    )
-    # ========== 结束 ==========
-
-    # ========== 更新统计JSON文件 ==========
+    # ========= 5. 更新 stats['cluster_biology'] 并写回 JSON =========
     updated_cluster_biology = []
-    for cluster in detailed_report:
+    for row in detailed_report:
+        cid = row["cluster_id"]
         updated_cluster_biology.append({
-            'cluster_id': cluster['cluster_id'],
-            'size': cluster['size'],
-            'gene_similarity': cluster['gene_similarity'],
-            'core_gene_count': cluster['core_gene_count'],
-            'total_gene_count': cluster['total_gene_count'],
-            'spot_count': cluster['spot_count'],
-            'spatial_compactness': cluster['spatial_compactness'],
-            'spatial_range_x': cluster['spatial_range_x'],
-            'spatial_range_y': cluster['spatial_range_y'],
-            'spatial_center_x': cluster['spatial_center_x'],
-            'spatial_center_y': cluster['spatial_center_y'],
-            'core_genes': cluster['core_genes'],
-            'core_enrichment': cluster['core_enrichment'],  # 新增：核心富集信息
-            'domains': cluster_info['domains']  # 从原始cluster_info获取
+            "cluster_id": cid,
+            "size": row["size"],
+            "gene_similarity": row["gene_similarity"],
+            "core_gene_count": row["core_gene_count"],
+            "total_gene_count": row["total_gene_count"],
+            "spot_count": row["spot_count"],
+            "spatial_compactness": row["spatial_compactness"],
+            "spatial_range_x": row["spatial_range_x"],
+            "spatial_range_y": row["spatial_range_y"],
+            "spatial_center_x": row["spatial_center_x"],
+            "spatial_center_y": row["spatial_center_y"],
+            "core_genes": row["core_genes"],
+            "core_enrichment": row["core_enrichment"],
+            "domains": row.get("domains_sample", []),
         })
 
-    # 更新统计信息
-    stats['cluster_biology'] = updated_cluster_biology
+    stats["cluster_biology"] = updated_cluster_biology
+
     with open(stats_path, "w") as f:
         json.dump(stats, f, indent=2)
-    # ========== 结束 ==========
 
-    # 在控制台输出聚类信息
-    print("\n" + "=" * 80)
-    print("聚类详细信息")
-    print("=" * 80)
-
-    for cluster in detailed_report:
-        print(f"\n聚类 {cluster['cluster_id']}:")
-        print(f"  - 大小: {cluster['size']} 个微域")
-        print(f"  - 类型: {cluster['cluster_type']}")
-        print(f"  - 基因相似度: {cluster['gene_similarity']:.3f}")
-        print(f"  - 核心基因: {cluster['core_gene_count']} 个 (总基因: {cluster['total_gene_count']} 个)")
-        print(f"  - 平均每个微域基因数: {cluster['avg_genes_per_domain']:.1f}")
-        print(f"  - 包含spots: {cluster['spot_count']} 个")
-        print(f"  - 空间紧凑性: {cluster['spatial_compactness']:.3f}")
-        print(f"  - 空间范围: X={cluster['spatial_range_x']:.1f}, Y={cluster['spatial_range_y']:.1f}")
-        print(f"  - 空间中心: ({cluster['spatial_center_x']:.1f}, {cluster['spatial_center_y']:.1f})")
-        print(f"  - 富集功能: {cluster['enrichment_summary']}")
-        print(f"  - 描述: {cluster['description']}")
-
-    # 输出总体统计
-    print("\n" + "=" * 80)
-    print("聚类总体统计")
-    print("=" * 80)
-
+    # ========= 6. 打印一些整体统计 =========
     total_clusters = len(detailed_report)
-    if total_clusters == 0:
-        print("没有有效的聚类")
-        return detailed_df
+    print(f"最终保留的聚类数: {total_clusters}")
 
-    total_domains = sum(cluster['size'] for cluster in detailed_report)
-    avg_gene_similarity = np.mean([cluster['gene_similarity'] for cluster in detailed_report])
-    avg_core_genes = np.mean([cluster['core_gene_count'] for cluster in detailed_report])
-    avg_compactness = np.mean([cluster['spatial_compactness'] for cluster in detailed_report])
+    if total_clusters > 0:
+        # 聚类类型分布
+        type_counts = {}
+        for r in detailed_report:
+            t = r["cluster_type"]
+            type_counts[t] = type_counts.get(t, 0) + 1
 
-    # 按类型统计
-    type_counts = {}
-    for cluster in detailed_report:
-        cluster_type = cluster['cluster_type']
-        type_counts[cluster_type] = type_counts.get(cluster_type, 0) + 1
+        print("聚类类型分布:")
+        for t, cnt in type_counts.items():
+            print(f"  - {t}: {cnt} 个 ({cnt / total_clusters * 100:.1f}%)")
 
-    print(f"总聚类数: {total_clusters}")
-    print(f"总微域数: {total_domains}")
-    print(f"平均基因相似度: {avg_gene_similarity:.3f}")
-    print(f"平均核心基因数: {avg_core_genes:.1f}")
-    print(f"平均空间紧凑性: {avg_compactness:.3f}")
-    print(f"聚类类型分布:")
-    for cluster_type, count in type_counts.items():
-        percentage = count / total_clusters * 100
-        print(f"  - {cluster_type}: {count} 个 ({percentage:.1f}%)")
+        # 大小分布
+        small_clusters = len([c for c in detailed_report if c["size"] < 30])
+        medium_clusters = len([c for c in detailed_report if 30 <= c["size"] <= 100])
+        large_clusters = len([c for c in detailed_report if c["size"] > 100])
 
-    # 按大小统计
-    small_clusters = len([c for c in detailed_report if c['size'] < 30])
-    medium_clusters = len([c for c in detailed_report if 30 <= c['size'] <= 100])
-    large_clusters = len([c for c in detailed_report if c['size'] > 100])
-
-    print(f"聚类大小分布:")
-    print(f"  - 小型聚类 (<30微域): {small_clusters} 个 ({small_clusters / total_clusters * 100:.1f}%)")
-    print(f"  - 中型聚类 (30-100微域): {medium_clusters} 个 ({medium_clusters / total_clusters * 100:.1f}%)")
-    print(f"  - 大型聚类 (>100微域): {large_clusters} 个 ({large_clusters / total_clusters * 100:.1f}%)")
+        print("聚类大小分布:")
+        print(f"  - 小型聚类 (<30微域): {small_clusters} 个 ({small_clusters / total_clusters * 100:.1f}%)")
+        print(f"  - 中型聚类 (30-100微域): {medium_clusters} 个 ({medium_clusters / total_clusters * 100:.1f}%)")
+        print(f"  - 大型聚类 (>100微域): {large_clusters} 个 ({large_clusters / total_clusters * 100:.1f}%)")
 
     return detailed_df
 
@@ -1313,10 +1308,9 @@ def main():
             )
 
             # 创建输出目录
-            if not os.path.exists(Config.output_dir):
-                os.makedirs(Config.output_dir)
-                os.makedirs(os.path.join(Config.output_dir, "figures"))
-                os.makedirs(os.path.join(Config.output_dir, "tables"))
+            os.makedirs(Config.output_dir, exist_ok=True)
+            os.makedirs(os.path.join(Config.output_dir, "figures"), exist_ok=True)
+            os.makedirs(os.path.join(Config.output_dir, "tables"), exist_ok=True)
 
             # 执行单样本分析流程
             print(f"===== 肿瘤微域特征基因分析流程开始: {Config.cancer_type} - {Config.id} =====")
@@ -1341,7 +1335,19 @@ def main():
                 raw_data, feature_genes, spot_coords
             )
 
-            # 4. 可视化聚类结果
+            # 4. 功能富集分析
+            stats_path = os.path.join(Config.output_dir, "tables", "community_detection_statistics.json")
+            if os.path.exists(stats_path):
+                with open(stats_path, "r") as f:
+                    stats = json.load(f)
+                cluster_biology = stats.get("cluster_biology", [])
+                # 将富集结果写回 cluster_biology，同时生成 all_clusters_enrichment_details.csv
+                cluster_biology = run_cluster_enrichment(cluster_biology, Config.output_dir)
+                stats["cluster_biology"] = cluster_biology
+                with open(stats_path, "w") as f:
+                    json.dump(stats, f, indent=2)
+
+            # 5. 可视化聚类结果
             if num_clusters == 0:
                 print("警告: 没有生成任何聚类，将只输出未聚类的结果")
                 cluster_results = []
@@ -1359,7 +1365,7 @@ def main():
             else:
                 visualize_community_detection(cluster_results, Config.output_dir)
 
-            # 5. 输出聚类详细信息
+            # 6. 输出聚类详细信息
             detailed_report = output_cluster_details(cluster_results, domain_gene_sets, raw_data, Config.output_dir)
 
             print(f"===== 肿瘤微域特征基因分析流程完成: {Config.cancer_type} - {Config.id} =====")
